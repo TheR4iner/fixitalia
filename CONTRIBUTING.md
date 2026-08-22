@@ -3,6 +3,9 @@
 fixitalia is maintained by one person in their spare time. Contributions are
 welcome; a slow response is likely, and is not a judgement on the contribution.
 
+By taking part you agree to the [code of conduct](./CODE_OF_CONDUCT.md). For
+security reports, see [SECURITY.md](./SECURITY.md) rather than opening an issue.
+
 ## The most valuable contribution
 
 **A wrong number.** Every figure on the site links to the portal it came from.
