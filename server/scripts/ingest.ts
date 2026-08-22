@@ -1,15 +1,12 @@
 #!/usr/bin/env tsx
 // Command line entry point for manual data ingestion.
 //
-// Usage (from inside the workspace container):
-//   dev exec backend npx tsx scripts/ingest.ts opere-incompiute
+// Usage, from server/:
+//   npx tsx scripts/ingest.ts opere-incompiute
 //
-// In production:
-//   docker compose -f docker-compose.prod.yml exec backend \
-//     npx tsx scripts/ingest.ts opere-incompiute
-//
-// (The old `fixitalia-dev` sidecar named here stopped existing at the
-// collapsed-workspace migration.)
+// Subcommands: opere-incompiute, spesa-pubblica, fondi-europei, appalti,
+// parlamento. Each creates the schema on first run, so there is nothing to
+// set up beforehand. See the README for which ones are cheap to run.
 //
 // Each data source gets a subcommand here so every ingest has the same
 // operational interface. This remains the manual escape hatch; routine
