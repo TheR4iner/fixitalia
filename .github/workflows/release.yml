@@ -1,25 +1,113 @@
 name: Release
 
+# Vendored from the shared reusable workflows; see the note in ci.yml.
+
 on:
   push:
     tags: ['v*']
 
 env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+  REGISTRY: ghcr.io
 
 jobs:
-  publish:
-    uses: TheR4iner/reusable-workflows/.github/workflows/web-docker-publish.yml@v1
-    with:
-      project-slug: fixitalia
-      default-branch: main
-    secrets: inherit
+  frontend:
+    name: Publish frontend
+    runs-on: ubuntu-latest
     permissions:
       contents: read
       packages: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Docker metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.REGISTRY }}/${{ github.repository_owner }}/fixitalia-frontend
+          tags: |
+            type=raw,value=latest
+            type=semver,pattern={{major}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=semver,pattern={{version}}
+            type=sha,format=short
+
+      # The app version shown in the UI comes from the tag, with the leading
+      # "v" stripped, so it never has to be maintained in a file.
+      - name: Derive VITE_APP_VERSION from the tag
+        id: app_version
+        env:
+          REF_NAME: ${{ github.ref_name }}
+        run: echo "value=${REF_NAME#v}" >> "$GITHUB_OUTPUT"
+
+      - name: Build and push
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: Dockerfile
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          build-args: |
+            VITE_APP_VERSION=${{ steps.app_version.outputs.value }}
+            VITE_API_URL=/api
+            VITE_ENVIRONMENT=production
+          cache-from: type=gha,scope=fixitalia-frontend
+          cache-to: type=gha,mode=max,scope=fixitalia-frontend
+
+  backend:
+    name: Publish backend
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Docker metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.REGISTRY }}/${{ github.repository_owner }}/fixitalia-backend
+          tags: |
+            type=raw,value=latest
+            type=semver,pattern={{major}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=semver,pattern={{version}}
+            type=sha,format=short
+
+      - name: Build and push
+        uses: docker/build-push-action@v6
+        with:
+          context: ./server
+          file: server/Dockerfile
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha,scope=fixitalia-backend
+          cache-to: type=gha,mode=max,scope=fixitalia-backend
 
   deploy:
-    needs: publish
+    name: Deploy to VPS
+    needs: [frontend, backend]
     runs-on: ubuntu-latest
     steps:
       # The VPS deploy key is locked to a single forced command in the box's
@@ -28,16 +116,14 @@ jobs:
       # directory on the box, and runs
       # `docker compose pull && up -d --remove-orphans` there. The key cannot
       # run arbitrary commands, scp files, or open a shell; SSH_ORIGINAL_COMMAND
-      # is only ever matched against the dispatcher's ALLOWED_PROJECTS list.
+      # is only ever matched against the dispatcher's allowed-projects list.
       #
       # So this job does exactly one thing: ssh the project slug. Everything the
-      # deploy needs on the box -- an up-to-date docker-compose.prod.yml and a
-      # populated .env.secrets (SURREAL_USER/PASS + MEILI_MASTER_KEY) -- is
-      # managed OUT OF BAND by the box owner over their own unrestricted SSH
-      # access, NOT by this workflow. The restricted key makes any in-workflow
-      # secret-sync or file-copy impossible by design. See DEPLOY.md ("Managing
-      # the compose file and secrets on the box").
-      - name: Deploy to VPS
+      # deploy needs on the box -- an up-to-date compose file and a populated
+      # secrets file -- is managed out of band by the box owner over their own
+      # unrestricted SSH access, NOT by this workflow. The restricted key makes
+      # any in-workflow secret-sync or file-copy impossible by design.
+      - name: Deploy
         env:
           VPS_DEPLOY_KEY: ${{ secrets.VPS_DEPLOY_KEY }}
           VPS_HOST: ${{ secrets.VPS_HOST }}
@@ -48,10 +134,11 @@ jobs:
           # rather than the actual cause.
           : "${VPS_USER:?set the VPS_USER repo secret}"
           : "${VPS_HOST:?set the VPS_HOST repo secret}"
+          : "${VPS_DEPLOY_KEY:?set the VPS_DEPLOY_KEY repo secret}"
           echo "$VPS_DEPLOY_KEY" > /tmp/deploy_key
           chmod 600 /tmp/deploy_key
-          # The remote command IS the project slug -- deploy.sh reads it from
-          # SSH_ORIGINAL_COMMAND. Anything else fails with "unknown project".
+          # The remote command IS the project slug -- the dispatcher reads it
+          # from SSH_ORIGINAL_COMMAND. Anything else fails with "unknown project".
           ssh -i /tmp/deploy_key -o StrictHostKeyChecking=no \
               "$VPS_USER@$VPS_HOST" fixitalia
           rm /tmp/deploy_key

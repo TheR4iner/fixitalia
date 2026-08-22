@@ -1,5 +1,13 @@
 name: Security
 
+# Vendored from the shared reusable workflows; see the note in ci.yml.
+#
+# Both jobs end in `|| true` and are therefore advisory: they surface
+# advisories and non-allowlisted licences in the log without failing the run.
+# That is deliberate, inherited behaviour -- a transitive advisory published
+# overnight should not block an unrelated pull request -- but it does mean a
+# green check here means "the scan ran", not "the scan found nothing".
+
 on:
   push:
     branches: [main, develop]
@@ -12,6 +20,46 @@ env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
 
 jobs:
-  security:
-    uses: TheR4iner/reusable-workflows/.github/workflows/web-security.yml@v1
-    secrets: inherit
+  npm-audit:
+    name: npm audit
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22.x'
+          cache: 'npm'
+
+      - name: Frontend audit
+        run: npm audit --audit-level=moderate || true
+
+      - name: Backend audit
+        working-directory: ./server
+        run: npm audit --audit-level=moderate || true
+
+  license-check:
+    name: License check
+    runs-on: ubuntu-latest
+    env:
+      ALLOWED: 'MIT;Apache-2.0;BSD-2-Clause;BSD-3-Clause;ISC;CC0-1.0;Unlicense;0BSD;Python-2.0'
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22.x'
+
+      - name: Install license-checker
+        run: npm install -g license-checker
+
+      - name: Check frontend licences
+        run: |
+          npm ci
+          license-checker --production --onlyAllow "$ALLOWED" || true
+
+      - name: Check backend licences
+        working-directory: ./server
+        run: |
+          npm ci
+          license-checker --production --onlyAllow "$ALLOWED" || true
