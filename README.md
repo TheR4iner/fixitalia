@@ -28,6 +28,16 @@ needs a real browser. Vitest throughout.
 
 ## Running it locally
 
+**You will get a working application with an empty database.** There is no
+database dump in this repository and none is published: the production data
+lives on the maintainer's server, and at roughly ten thousand parliamentary
+sittings it is far too large to distribute here. Every figure the site shows is
+re-derivable from public portals with the ingest CLI, so a local instance
+populates itself; it just does not start populated.
+
+To see what a full instance looks like, use the live site:
+<https://fixitalia.wochugondu.it>.
+
 Node 22+ and Docker. No build step first; both watchers compile on the fly.
 
 ```bash
@@ -56,15 +66,34 @@ cd server && npm install && npm run dev      # http://localhost:3001
 
 Browse via the frontend port; Vite proxies `/api` to the backend.
 
-A fresh database is empty and every page shows its "no data" state until you
-ingest something. Start with a small section, since the parliamentary corpus
-takes hours and hits upstream rate limits:
+### Getting data into it
+
+Until you ingest something, every page renders its "no data" state. The ingest
+CLI creates the schema on first run, so there is nothing to set up first:
 
 ```bash
-cd server && npx tsx scripts/ingest.ts --help
+cd server
+npx tsx scripts/ingest.ts opere-incompiute    # start here: one bulk download
+npx tsx scripts/ingest.ts appalti             # ANAC contracting authorities
+npx tsx scripts/ingest.ts spesa-pubblica      # state budget, BDAP
+npx tsx scripts/ingest.ts fondi-europei       # EU cohesion projects
 ```
 
-Checks: `npm run lint`, `npx tsc --noEmit`, `npm run test:run`, and
+Those four are single bulk downloads and finish in minutes, which is enough to
+have real pages to work against.
+
+`parlamento` is a different proposition. It fetches sittings one at a time,
+takes hours for a full chamber, and the Senato source sits behind a WAF that
+rate-limits sustained fetching, so it has to run throttled and resumable. If you
+are working on that section, pull a slice rather than the whole thing:
+
+```bash
+npx tsx scripts/ingest.ts parlamento --chamber camera --legislatura 19 --limit 20
+```
+
+### Checks
+
+`npm run lint`, `npx tsc --noEmit`, `npm run test:run`, and
 `npm run type-check && npm run test:run` in `server/`.
 
 Deployment config is specific to the maintainer's server and is not tracked
