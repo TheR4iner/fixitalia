@@ -1,0 +1,160 @@
+@import "tailwindcss";
+@import "tw-animate-css";
+@import "shadcn/tailwind.css";
+@import "@fontsource-variable/geist";
+@import "@fontsource-variable/source-serif-4";
+
+@custom-variant dark (&:is(.dark *));
+
+@theme inline {
+    /* Editorial pairing: Source Serif 4 (display) + Geist (body). The
+       brief calls for plain-language headlines that read like a data desk;
+       a calm humanist serif is the natural pairing with the warm earth
+       palette below. */
+    --font-heading: 'Source Serif 4 Variable', 'Source Serif 4', Georgia, 'Times New Roman', serif;
+    --font-sans: 'Geist Variable', sans-serif;
+    --color-chart-accent: var(--chart-accent);
+    --color-chart-5: var(--chart-5);
+    --color-chart-4: var(--chart-4);
+    --color-chart-3: var(--chart-3);
+    --color-chart-2: var(--chart-2);
+    --color-chart-1: var(--chart-1);
+    --color-ring: var(--ring);
+    --color-input: var(--input);
+    --color-border: var(--border);
+    --color-destructive: var(--destructive);
+    --color-accent-foreground: var(--accent-foreground);
+    --color-accent: var(--accent);
+    --color-muted-foreground: var(--muted-foreground);
+    --color-muted: var(--muted);
+    --color-secondary-foreground: var(--secondary-foreground);
+    --color-secondary: var(--secondary);
+    --color-primary-foreground: var(--primary-foreground);
+    --color-primary: var(--primary);
+    --color-popover-foreground: var(--popover-foreground);
+    --color-popover: var(--popover);
+    --color-card-foreground: var(--card-foreground);
+    --color-card: var(--card);
+    --color-foreground: var(--foreground);
+    --color-background: var(--background);
+    /* Semantic state tokens. Success rides on the olive primary family,
+       highlight on the ochre accent family, warning on a softer ochre.
+       Every "raw palette" usage in the app routes through one of these. */
+    --color-success: var(--success);
+    --color-success-foreground: var(--success-foreground);
+    --color-highlight: var(--highlight);
+    --color-highlight-foreground: var(--highlight-foreground);
+    --color-warning: var(--warning);
+    --color-warning-foreground: var(--warning-foreground);
+    --color-warning-border: var(--warning-border);
+    --radius-sm: calc(var(--radius) * 0.6);
+    --radius-md: calc(var(--radius) * 0.8);
+    --radius-lg: var(--radius);
+    --radius-xl: calc(var(--radius) * 1.4);
+    --radius-2xl: calc(var(--radius) * 1.8);
+    --radius-3xl: calc(var(--radius) * 2.2);
+    --radius-4xl: calc(var(--radius) * 2.6);
+}
+
+:root {
+    /* Editorial "newspaper data desk" palette. Earthy, Italian, no blue:
+       olive-green primary (hue ~135, institutional), warm ochre accent
+       (hue ~65, editorial contrast), warm charcoal text (hue ~50, off
+       the neutral axis so type reads warm rather than clinical), paper-
+       warm off-white background. Red (hue ~22) stays reserved for
+       genuinely anomalous values per the brief -- never decorative. */
+    --background: oklch(0.982 0.007 85);       /* warm off-white page */
+    --foreground: oklch(0.22 0.02 50);         /* warm dark charcoal */
+    --card: oklch(0.995 0.004 85);             /* paper white */
+    --card-foreground: oklch(0.22 0.02 50);
+    --popover: oklch(0.995 0.004 85);
+    --popover-foreground: oklch(0.22 0.02 50);
+    --primary: oklch(0.36 0.08 135);           /* deep olive-green buttons */
+    --primary-foreground: oklch(0.985 0.005 85);
+    --secondary: oklch(0.95 0.012 85);
+    --secondary-foreground: oklch(0.22 0.02 50);
+    --muted: oklch(0.95 0.012 85);
+    --muted-foreground: oklch(0.48 0.018 50);
+    --accent: oklch(0.93 0.03 65);             /* warm ochre hover tint */
+    --accent-foreground: oklch(0.22 0.02 50);
+    --destructive: oklch(0.55 0.22 22);        /* anomaly red */
+    --border: oklch(0.88 0.012 50);
+    --input: oklch(0.88 0.012 50);
+    --ring: oklch(0.58 0.08 135);              /* olive focus ring */
+    /* Chart scale: olive family (1, 3, 5) + ochre family (2, 4).
+       chart-1 is the default single-series bar colour. */
+    --chart-1: oklch(0.36 0.08 135);           /* deep olive */
+    --chart-2: oklch(0.62 0.15 65);            /* warm ochre */
+    --chart-3: oklch(0.54 0.06 135);           /* mid olive */
+    --chart-4: oklch(0.73 0.11 65);            /* light ochre */
+    --chart-5: oklch(0.78 0.04 135);           /* pale olive */
+    --chart-accent: oklch(0.58 0.15 65);       /* ochre emphasis */
+    /* Semantic state tokens, light mode. */
+    --success: oklch(0.58 0.14 140);           /* confident olive-green */
+    --success-foreground: oklch(0.985 0.005 85);
+    --highlight: oklch(0.92 0.13 78);          /* light ochre wash for <mark> */
+    --highlight-foreground: oklch(0.22 0.02 50);
+    --warning: oklch(0.95 0.05 75);            /* gentle ochre notice bg */
+    --warning-foreground: oklch(0.30 0.06 50); /* warm dark text */
+    --warning-border: oklch(0.78 0.10 75);
+    --radius: 0.625rem;
+}
+
+.dark {
+    /* Dark mode: warm near-black page (hue 50, same family as the
+       light-mode foreground), warm off-white text. Data colours swap
+       lightness so olive and ochre stay legible on a dark surface. */
+    --background: oklch(0.17 0.012 50);        /* warm dark near-black */
+    --foreground: oklch(0.95 0.008 85);        /* warm off-white */
+    --card: oklch(0.22 0.012 50);              /* raised warm dark */
+    --card-foreground: oklch(0.95 0.008 85);
+    --popover: oklch(0.22 0.012 50);
+    --popover-foreground: oklch(0.95 0.008 85);
+    --primary: oklch(0.78 0.1 135);            /* light olive for buttons on dark */
+    --primary-foreground: oklch(0.17 0.012 50);
+    --secondary: oklch(0.28 0.012 50);
+    --secondary-foreground: oklch(0.95 0.008 85);
+    --muted: oklch(0.28 0.012 50);
+    --muted-foreground: oklch(0.78 0.015 85);
+    --accent: oklch(0.28 0.04 65);             /* ochre-tinted hover surface */
+    --accent-foreground: oklch(0.95 0.008 85);
+    --destructive: oklch(0.7 0.19 22);
+    --border: oklch(1 0 0 / 10%);
+    --input: oklch(1 0 0 / 14%);
+    --ring: oklch(0.62 0.08 135);              /* olive focus ring */
+    --chart-1: oklch(0.76 0.1 135);            /* light olive */
+    --chart-2: oklch(0.74 0.14 65);            /* bright ochre */
+    --chart-3: oklch(0.62 0.07 135);           /* mid olive */
+    --chart-4: oklch(0.6 0.12 65);             /* mid ochre */
+    --chart-5: oklch(0.44 0.05 135);           /* faded olive */
+    --chart-accent: oklch(0.72 0.15 65);       /* ochre emphasis */
+    /* Semantic state tokens, dark mode. */
+    --success: oklch(0.74 0.15 140);
+    --success-foreground: oklch(0.17 0.012 50);
+    --highlight: oklch(0.55 0.12 78);
+    --highlight-foreground: oklch(0.97 0.01 85);
+    --warning: oklch(0.30 0.05 75);
+    --warning-foreground: oklch(0.92 0.05 75);
+    --warning-border: oklch(0.50 0.09 75);
+}
+
+@layer base {
+  * {
+    @apply border-border outline-ring/50;
+    }
+  body {
+    @apply bg-background text-foreground;
+    }
+  html {
+    @apply font-sans;
+    }
+  /* Search-result highlight. One rule, used by every <mark> in the app
+     (BM25 snippet rendering on the parlamento search and per-speaker
+     pages). Token-driven so light and dark themes stay in sync. */
+  mark {
+    background-color: var(--highlight);
+    color: var(--highlight-foreground);
+    border-radius: 0.125rem;
+    padding: 0 0.125rem;
+  }
+}

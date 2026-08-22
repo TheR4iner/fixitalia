@@ -1,0 +1,46 @@
+{
+  "name": "fixitalia-server",
+  "description": "fixitalia backend",
+  "private": true,
+  "license": "MIT",
+  "author": "Rolando Reiner",
+  "version": "0.0.0",
+  "type": "module",
+  "scripts": {
+    "dev": "node --watch --import tsx/esm server.ts",
+    "build": "tsc -p tsconfig.build.json",
+    "start": "node dist/server.js",
+    "type-check": "tsc --noEmit",
+    "test": "vitest",
+    "test:run": "vitest run",
+    "test:coverage": "vitest run --coverage"
+  },
+  "dependencies": {
+    "cors": "^2.8.5",
+    "csv-parse": "^6.2.1",
+    "express": "^5.1.0",
+    "fast-xml-parser": "^4.5.6",
+    "fflate": "^0.8.2",
+    "helmet": "^8.1.0",
+    "linkedom": "^0.18.12",
+    "playwright": "^1.60.0",
+    "surrealdb": "^2.0.3",
+    "xlsx": "https://cdn.sheetjs.com/xlsx-0.20.3/xlsx-0.20.3.tgz"
+  },
+  "devDependencies": {
+    "@types/cors": "^2.8.19",
+    "@types/express": "^5.0.3",
+    "@types/node": "^24.6.2",
+    "@vitest/coverage-v8": "^3.2.4",
+    "tsx": "^4.20.5",
+    "typescript": "^5.9.3",
+    "vitest": "^3.2.4"
+  },
+  "optionalDependencies": {
+    "@rollup/rollup-darwin-arm64": "*",
+    "@rollup/rollup-darwin-x64": "*",
+    "@rollup/rollup-linux-arm64-gnu": "*",
+    "@rollup/rollup-linux-x64-gnu": "*",
+    "@rollup/rollup-win32-x64-msvc": "*"
+  }
+}

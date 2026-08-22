@@ -1,0 +1,57 @@
+name: Release
+
+on:
+  push:
+    tags: ['v*']
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
+jobs:
+  publish:
+    uses: TheR4iner/reusable-workflows/.github/workflows/web-docker-publish.yml@v1
+    with:
+      project-slug: fixitalia
+      default-branch: main
+    secrets: inherit
+    permissions:
+      contents: read
+      packages: write
+
+  deploy:
+    needs: publish
+    runs-on: ubuntu-latest
+    steps:
+      # The VPS deploy key is locked to a single forced command in the box's
+      # authorized_keys: a shared edge dispatcher script. That dispatcher takes
+      # ONE argument -- the project slug -- resolves it to that project's
+      # directory on the box, and runs
+      # `docker compose pull && up -d --remove-orphans` there. The key cannot
+      # run arbitrary commands, scp files, or open a shell; SSH_ORIGINAL_COMMAND
+      # is only ever matched against the dispatcher's ALLOWED_PROJECTS list.
+      #
+      # So this job does exactly one thing: ssh the project slug. Everything the
+      # deploy needs on the box -- an up-to-date docker-compose.prod.yml and a
+      # populated .env.secrets (SURREAL_USER/PASS + MEILI_MASTER_KEY) -- is
+      # managed OUT OF BAND by the box owner over their own unrestricted SSH
+      # access, NOT by this workflow. The restricted key makes any in-workflow
+      # secret-sync or file-copy impossible by design. See DEPLOY.md ("Managing
+      # the compose file and secrets on the box").
+      - name: Deploy to VPS
+        env:
+          VPS_DEPLOY_KEY: ${{ secrets.VPS_DEPLOY_KEY }}
+          VPS_HOST: ${{ secrets.VPS_HOST }}
+          VPS_USER: ${{ secrets.VPS_USER }}
+        run: |
+          # Fail loudly on a missing secret. Without this, an unset VPS_USER
+          # expands to "@$VPS_HOST" and ssh reports a confusing auth error
+          # rather than the actual cause.
+          : "${VPS_USER:?set the VPS_USER repo secret}"
+          : "${VPS_HOST:?set the VPS_HOST repo secret}"
+          echo "$VPS_DEPLOY_KEY" > /tmp/deploy_key
+          chmod 600 /tmp/deploy_key
+          # The remote command IS the project slug -- deploy.sh reads it from
+          # SSH_ORIGINAL_COMMAND. Anything else fails with "unknown project".
+          ssh -i /tmp/deploy_key -o StrictHostKeyChecking=no \
+              "$VPS_USER@$VPS_HOST" fixitalia
+          rm /tmp/deploy_key

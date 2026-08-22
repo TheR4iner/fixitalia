@@ -1,0 +1,4 @@
+- numeri e riferimenti a leggi e disegni di legge cliccabili (che rimandano al sito ufficiale con il testo in questione) 
+- claude brainstorming for most useful features to add (e.g. for journalists or for people that want deeper analysys tools on the parliament sessions)
+- AI fact-check tool on parliament sessions claims
+- for long insterventions the speaker name should be always visible next to the text (otherwise I scroll down and I forget who is speaking)

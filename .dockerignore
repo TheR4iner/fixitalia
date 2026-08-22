@@ -1,0 +1,58 @@
+# Workspace dev-container files (sandbox, firewall, xclip shim -- not for prod images)
+.workspace
+
+# Dependencies (installed inside the image)
+node_modules
+server/node_modules
+
+# Build output (rebuilt in the image)
+dist
+server/dist
+
+# Git
+.git
+.gitignore
+.github
+
+# Editor
+.vscode
+.idea
+
+# Docs and AI context files (not needed in the image)
+*.md
+!README.md
+CLAUDE.md
+project-kb
+
+# Env files (secrets are injected at runtime via env_file)
+.env
+.env.*
+!.env.example
+
+# Test files
+coverage
+server/coverage
+*.test.ts
+*.test.tsx
+*.spec.ts
+*.spec.tsx
+__tests__
+tests
+playwright-report
+test-results
+
+# Database files (should be mounted as volume)
+server/data/*.db
+server/data/*.sqlite
+server/data/*.sqlite3
+
+# Temporary files
+*.log
+*.tmp
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Template internals
+.template

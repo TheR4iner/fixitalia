@@ -1,0 +1,34 @@
+<!doctype html>
+<html lang="it">
+  <head>
+    <meta charset="UTF-8" />
+    <link rel="icon" type="image/svg+xml" href="/vite.svg" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="color-scheme" content="light dark" />
+    <meta
+      name="description"
+      content="fixitalia raccoglie appalti, opere incompiute, fondi europei, spesa pubblica e attivita parlamentare dai portali ufficiali italiani e li racconta in modo chiaro, con le fonti sempre a un clic di distanza."
+    />
+    <title>fixitalia -- I dati pubblici italiani, finalmente leggibili</title>
+    <script>
+      // Pre-paint theme resolution to avoid a light-to-dark flash on first
+      // render. Mirrors the logic in src/hooks/useTheme.ts: explicit user
+      // choice in localStorage wins, otherwise follow the system.
+      (function () {
+        try {
+          var stored = localStorage.getItem('fixitalia.theme')
+          var prefersDark = window.matchMedia('(prefers-color-scheme: dark)').matches
+          var isDark = stored === 'dark' || (stored !== 'light' && prefersDark)
+          if (isDark) document.documentElement.classList.add('dark')
+        } catch (e) {
+          // localStorage can be unavailable (Safari private mode); fall
+          // back to the light theme in that case -- no class applied.
+        }
+      })()
+    </script>
+  </head>
+  <body>
+    <div id="root"></div>
+    <script type="module" src="/src/main.tsx"></script>
+  </body>
+</html>
