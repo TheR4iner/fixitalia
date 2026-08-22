@@ -2,6 +2,8 @@
 
 **I dati pubblici italiani, finalmente leggibili.**
 
+### → [fixitalia.wochugondu.it](https://fixitalia.wochugondu.it)
+
 La pubblica amministrazione italiana è obbligata per legge a pubblicare i propri
 dati, e lo fa: appalti, opere incompiute, fondi europei, spesa dello Stato,
 attività parlamentare. Ma li pubblica in decine di portali diversi, in CSV
@@ -35,8 +37,8 @@ sittings it is far too large to distribute here. Every figure the site shows is
 re-derivable from public portals with the ingest CLI, so a local instance
 populates itself; it just does not start populated.
 
-To see what a full instance looks like, use the live site:
-<https://fixitalia.wochugondu.it>.
+To see what a full instance looks like, use the live site linked at the top
+of this README.
 
 Node 22+ and Docker. No build step first; both watchers compile on the fly.
 
