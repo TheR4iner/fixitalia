@@ -1,0 +1,187 @@
+name: Dependabot auto-merge
+
+# Merges Dependabot's low-risk pull requests once CI is green, and leaves the
+# rest for a human.
+#
+# Why `pull_request_target` and not `pull_request`: a workflow run triggered by
+# Dependabot on the `pull_request` event gets a READ-ONLY `GITHUB_TOKEN` and no
+# repository secrets, so it cannot merge anything. `pull_request_target` runs in
+# the base repository's context with a writable token.
+#
+# That trigger is dangerous when it checks out and executes the pull request's
+# code, because the code is contributor-controlled and the token is not. This
+# workflow never checks out anything. It reads metadata from the Dependabot API
+# and calls `gh`. Keep it that way: do not add `actions/checkout` here.
+
+on:
+  pull_request_target:
+    types: [opened, synchronize, reopened]
+
+permissions:
+  contents: write
+  pull-requests: write
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  auto-merge:
+    name: Auto-merge
+    # On the pull request's author, not `github.actor`: the latter is whoever
+    # triggered this event, so a human reopening a Dependabot pull request
+    # would silently switch the automation off for it. The counterpart check
+    # in claude-review.yml has the same reasoning and the opposite sign.
+    if: github.event.pull_request.user.login == 'dependabot[bot]'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Read Dependabot metadata
+        id: meta
+        uses: dependabot/fetch-metadata@v3
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+
+      # Three gates. Any one of them sends the pull request to a human.
+      #
+      # 1. Semver. For a grouped pull request `update-type` is the largest
+      #    bump in the group, so a group containing one major is a major.
+      #
+      # 2. The deny list. Auto-merge is a bet that a green pipeline means a
+      #    working application, and for these packages that bet does not
+      #    hold. The backend tests exercise the ingest parsers against
+      #    captured fixtures, not against live upstream pages or a live
+      #    database, so a change in how `linkedom` handles malformed markup
+      #    or in what shape the `surrealdb` client returns can pass every
+      #    check and break ingest silently. That is the failure this project
+      #    cares about most: a page that looks right and is wrong.
+      #
+      #    Add to the list when a runtime dependency's correctness is proved
+      #    by something CI does not run. Remove from it when real coverage
+      #    arrives.
+      - name: Decide
+        id: decide
+        env:
+          UPDATE_TYPE: ${{ steps.meta.outputs.update-type }}
+          DEPENDENCY_NAMES: ${{ steps.meta.outputs.dependency-names }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: |
+          set -euo pipefail
+
+          DENY_LIST='surrealdb playwright linkedom csv-parse express'
+
+          # No metadata means no basis for a decision, so do not merge on it.
+          hold=''
+          if [[ -z "${DEPENDENCY_NAMES// /}" ]]; then
+            hold='dependency-names was empty'
+          fi
+
+          # 3. Provenance. The job-level guard tests the pull request's
+          #    author, which is right for `reopened` but not sufficient on
+          #    `synchronize`: the author stays `dependabot[bot]` when a human
+          #    pushes onto the branch, so the branch could carry hand-written
+          #    commits while the metadata still describes Dependabot's
+          #    original bump. Everything on the branch has to be Dependabot's
+          #    for that metadata to describe what is being merged.
+          if ! authors="$(gh api "repos/$REPO/pulls/$PR_NUMBER/commits" \
+                --paginate --jq '.[].author.login // "unknown"' 2>/dev/null)"; then
+            hold="${hold:+$hold, }could not read the branch's commit authors"
+          else
+            others="$(sort -u <<< "$authors" | grep -vxF 'dependabot[bot]' || true)"
+            if [[ -n "$others" ]]; then
+              hold="${hold:+$hold, }branch carries commits by $(tr '\n' ' ' <<< "$others")"
+            fi
+          fi
+
+          case "$UPDATE_TYPE" in
+            version-update:semver-patch|version-update:semver-minor) ;;
+            *) hold="$UPDATE_TYPE" ;;
+          esac
+
+          # `dependency-names` is comma-separated, and a grouped pull request
+          # lists every member, so one denied package holds the whole group.
+          IFS=',' read -ra names <<< "$DEPENDENCY_NAMES"
+          for raw in "${names[@]}"; do
+            name="$(echo "$raw" | tr -d '[:space:]')"
+            [[ -n "$name" ]] || continue
+            for denied in $DENY_LIST; do
+              if [[ "$name" == "$denied" ]]; then
+                hold="${hold:+$hold, }not covered by CI: $name"
+              fi
+            done
+          done
+
+          if [[ -z "$hold" ]]; then
+            echo 'merge=true' >> "$GITHUB_OUTPUT"
+            echo "Patch or minor bump of: $DEPENDENCY_NAMES -- eligible."
+          else
+            echo 'merge=false' >> "$GITHUB_OUTPUT"
+            echo "Holding $DEPENDENCY_NAMES for review ($hold)."
+          fi
+
+      - name: Label majors for review
+        if: steps.decide.outputs.merge == 'false'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR_URL: ${{ github.event.pull_request.html_url }}
+        run: gh pr edit "$PR_URL" --add-label 'needs-review' || true
+
+      # Waits for the checks that branch protection actually requires, then
+      # merges. Exits non-zero the moment a required check fails, which leaves
+      # the pull request open and unmerged.
+      #
+      # `--required` is load-bearing, not a refinement. Without it, `gh pr
+      # checks --watch` waits for EVERY check on the pull request, and this
+      # job is itself one of them, so it waits on itself until the job
+      # timeout. That is not hypothetical: it is what happened to #18, which
+      # sat with every real check green and `Auto-merge` pending until it was
+      # cancelled by hand. Requiring at least one branch protection check is
+      # therefore a prerequisite for this workflow, since `--required` has
+      # nothing to wait for otherwise.
+      #
+      # The tidier alternative is `gh pr merge --auto`, which hands the wait
+      # to GitHub and costs no runner minutes, but it needs "Allow auto-merge"
+      # enabled in the repository settings. Switch to it if that gets turned
+      # on.
+      - name: Wait for required checks
+        if: steps.decide.outputs.merge == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR_URL: ${{ github.event.pull_request.html_url }}
+        run: |
+          set -euo pipefail
+
+          # Wait for the required checks to EXIST, which is a different
+          # question from whether they have passed. Without `--json`,
+          # `gh pr checks` exits non-zero for a check that is merely still
+          # running, so looping on its exit status would block until CI had
+          # actually finished and then hard-fail on a slow-but-healthy run,
+          # reporting "no checks appeared" about a check that had appeared
+          # and was simply in progress. With `--json` it exits 0 and returns
+          # the array whatever the state, which is the distinction needed
+          # here. Verified against a passing and a failing pull request.
+          for attempt in $(seq 1 10); do
+            found="$(gh pr checks "$PR_URL" --required --json name 2>/dev/null || echo '[]')"
+            if [[ "$(jq 'length' <<< "$found" 2>/dev/null || echo 0)" -gt 0 ]]; then
+              break
+            fi
+            if (( attempt == 10 )); then
+              echo "::error::No required check has been created on $PR_URL after five minutes. Branch protection must require at least one check for this workflow to gate on."
+              exit 1
+            fi
+            echo "No required check registered yet; retrying in 30s (attempt $attempt/10)."
+            sleep 30
+          done
+
+          # Now do the actual waiting, which has no timeout of its own beyond
+          # the job's.
+          gh pr checks "$PR_URL" --watch --fail-fast --required --interval 30
+
+      - name: Merge
+        if: steps.decide.outputs.merge == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR_URL: ${{ github.event.pull_request.html_url }}
+        run: gh pr merge "$PR_URL" --squash --delete-branch

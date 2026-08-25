@@ -22,15 +22,27 @@ export default defineConfig({
   plugins: [react(), tailwindcss()],
   resolve: {
     alias: {
-      '@': path.resolve(__dirname, './src'),
+      // `import.meta.dirname`, not `__dirname`: Vite 8 warns that the
+      // native config loader it is moving to cannot provide the CommonJS
+      // globals, and that loader becomes the default in a future major.
+      '@': path.resolve(import.meta.dirname, './src'),
     },
   },
   build: {
     rollupOptions: {
       output: {
-        manualChunks: {
-          vendor: ['react', 'react-dom', 'react-router-dom'],
-          charts: ['recharts'],
+        // Function form, not the object form. Vite 8 bundles with Rolldown,
+        // which accepts only a function here and fails the build with
+        // "manualChunks is not a function" otherwise. Same two chunks as
+        // before: React and the router together, recharts on its own so the
+        // charting code is not pulled into the initial payload.
+        manualChunks: (id: string) => {
+          if (!id.includes('node_modules')) return undefined
+          if (/[\\/]node_modules[\\/](react|react-dom|react-router|react-router-dom)[\\/]/.test(id)) {
+            return 'vendor'
+          }
+          if (/[\\/]node_modules[\\/]recharts[\\/]/.test(id)) return 'charts'
+          return undefined
         },
       },
     },

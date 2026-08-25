@@ -14,11 +14,18 @@ name: Claude Review
 # leak their secrets. Do not change it without understanding that.
 #
 # A useful side effect: because forks cannot trigger it, an outside contributor
-# cannot spend API credit by opening pull requests.
+# cannot spend credit by opening pull requests.
+#
+# `synchronize` is deliberately absent. It fires on every push to a pull
+# request branch, so an afternoon of six pushes would buy six full reviews of
+# largely the same diff, which is the single largest way this workflow can
+# waste a subscription. The cost of leaving it out is that a pull request
+# rewritten after its review is not re-reviewed automatically; re-run the
+# workflow from the Actions tab when that matters.
 
 on:
   pull_request:
-    types: [opened, synchronize]
+    types: [opened, reopened, ready_for_review]
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
@@ -27,21 +34,91 @@ concurrency:
 jobs:
   review:
     name: Review
-    # Same-repository branches only; see the note above.
-    if: github.event.pull_request.head.repo.full_name == github.repository
+    # Same-repository branches only; see the note above. Dependabot is
+    # excluded for the same reason forks are: GitHub withholds secrets from
+    # runs it triggers, so the job could only ever fail. Its pull requests are
+    # handled by dependabot-auto-merge.yml instead.
+    #
+    # The test is on the pull request's AUTHOR, not on `github.actor`.
+    # `github.actor` is whoever caused this particular event, so a human
+    # reopening or un-drafting a Dependabot pull request passes an
+    # actor-based check and buys a full paid review of a lockfile diff. That
+    # is not hypothetical: it is what a single `gh pr reopen 18` did.
+    if: >-
+      github.event.pull_request.head.repo.full_name == github.repository &&
+      github.event.pull_request.user.login != 'dependabot[bot]' &&
+      github.event.pull_request.draft == false
     runs-on: ubuntu-latest
+    # Kept comfortably above what 40 turns costs, so the turn cap is the
+    # thing that stops a runaway review rather than the wall clock. A job
+    # timeout is a raw cancellation: it kills the `if: always()` reporting
+    # step too, so the run ends with no explanation, which is the opposite of
+    # what the turn cap is for. Measured: 25 turns took 2m39s.
+    timeout-minutes: 30
     permissions:
       contents: read
       pull-requests: write
+      actions: read
+      # Not needed while `github_token` is passed below, since that skips the
+      # OIDC exchange. Kept so that removing `github_token` to authenticate as
+      # the Claude GitHub App is a one-line change.
       id-token: write
     steps:
-      - uses: actions/checkout@v5
+      # Needed up front for the local composite action below, not only for
+      # Claude's own working directory.
+      - uses: actions/checkout@v7
         with:
           fetch-depth: 1
 
-      - uses: anthropics/claude-code-action@v1
+      # The `secrets` context cannot be used in a job-level `if`, so the
+      # presence of the key is checked here instead. Without this the job
+      # fails on every pull request whenever the secret is unset, which reads
+      # as a broken build rather than as missing configuration.
+      - name: Check for a credential
+        id: preflight
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+        run: |
+          if [[ -n "$ANTHROPIC_API_KEY" || -n "$CLAUDE_CODE_OAUTH_TOKEN" ]]; then
+            echo 'configured=true' >> "$GITHUB_OUTPUT"
+          else
+            echo 'configured=false' >> "$GITHUB_OUTPUT"
+            echo '::notice::Neither ANTHROPIC_API_KEY nor CLAUDE_CODE_OAUTH_TOKEN is set; skipping the review.'
+          fi
+
+      # Twenty reviews in a rolling week. See the action for why this is
+      # counted in invocations rather than in tokens.
+      - name: Weekly budget
+        id: budget
+        if: steps.preflight.outputs.configured == 'true'
+        uses: ./.github/actions/claude-budget
         with:
+          workflow: claude-review.yml
+          max-runs-per-week: 20
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Run Claude
+        uses: anthropics/claude-code-action@v1
+        if: steps.budget.outputs.within-budget == 'true'
+        env:
+          # The `github_token` input authenticates the action itself. It does
+          # not necessarily reach the shell Claude runs `gh` in, and a `gh`
+          # with no token fails in a way that looks like Claude simply
+          # deciding not to comment. Setting it here removes the question.
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          # Authenticate to GitHub as this workflow rather than as the Claude
+          # GitHub App, so the app does not have to be installed on the
+          # repository. Comments arrive from github-actions[bot] instead of
+          # from Claude. Delete this line to use the app instead.
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          # Set whichever one you have. An API key from the Claude Console
+          # bills through the API; an OAuth token from `claude setup-token`
+          # uses a Claude subscription instead. The action forwards each input
+          # to its own environment variable, so leaving one empty is fine.
           anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
+          claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
           prompt: |
             REPO: ${{ github.repository }}
             PR NUMBER: ${{ github.event.pull_request.number }}
@@ -73,6 +150,14 @@ jobs:
             - Then the usual: bugs, missing error handling, silent failures,
               type-safety escapes, and test coverage for the behaviour changed.
 
+            **Do not read lockfiles.** `package-lock.json` and
+            `server/package-lock.json` are generated, and a dependency pull
+            request puts thousands of unreviewable lines of integrity hashes
+            in front of you. Read the `package.json` diffs instead, which say
+            what actually changed, and spend the rest of the budget on source.
+            The same goes for anything else generated: `dist/`, coverage
+            output, build artefacts.
+
             Be specific and concise. Skip praise and skip restating the diff.
             If the change is sound, say so briefly rather than inventing
             findings.
@@ -83,4 +168,9 @@ jobs:
             through those tools only; do not return the review as a message.
 
           claude_args: |
+            --max-turns 40
             --allowedTools "mcp__github_inline_comment__create_inline_comment,Bash(gh pr comment:*),Bash(gh pr diff:*),Bash(gh pr view:*)"
+
+      - name: Report what Claude did
+        if: always() && steps.budget.outputs.within-budget == 'true'
+        uses: ./.github/actions/claude-report
