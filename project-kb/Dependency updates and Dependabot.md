@@ -172,10 +172,11 @@ nothing imports is a packaging bug, not a security problem.
   they were deliberately excluded from the security sweep. They are a real
   major upgrade: `vite` 8 wants `@vitejs/plugin-react` 6, and the frontend and
   backend should move together so the two test setups do not diverge.
-- **`ANTHROPIC_API_KEY` is not configured**, and `claude-review.yml` is
-  currently `disabled_manually`. The workflow now skips cleanly instead of
-  failing when the key is absent, so it can be re-enabled safely, but it will
-  do nothing until the secret is set.
+- **No Claude secret is configured**, and `claude-review.yml` is currently
+  `disabled_manually`. Both Claude workflows now skip cleanly instead of
+  failing, and both accept either `ANTHROPIC_API_KEY` or
+  `CLAUDE_CODE_OAUTH_TOKEN`, but neither does anything until one of those
+  secrets exists and the review workflow is re-enabled.
 - **`security.yml` is advisory only.** Both jobs end in `|| true`, so a green
   check means the scan ran, not that it found nothing. Making the audit job
   fail on `high` and above would have caught the React Router advisory at the

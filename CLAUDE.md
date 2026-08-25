@@ -208,7 +208,7 @@ files here directly; there is no upstream to pick changes up from.
 - **On push/PR** to `main` or `develop`: `ci.yml` runs the frontend job (lint, `tsc --noEmit`, tests, build) and the backend job (type-check, tests), then a `ci-success` gate that fails if either did. `ci.yml` does **not** publish images -- pushing to `main` builds and verifies only.
 - **On `v*` tag push**: `release.yml` publishes the images to `ghcr.io/TheR4iner/fixitalia-{frontend,backend}` -- semver tags (`{major}`, `{major}.{minor}`, `{version}`), a short-SHA tag, and `latest` -- then runs the `deploy` job (syncs the SurrealDB login to the VPS, then SSHes in to pull + restart). Tagging is the only path that publishes images or deploys. Create release tags with `git tag v1.2.3 && git push --tags`.
 - **Weekly (Mondays 09:00 UTC) and on push/PR**: `security.yml` runs `npm audit` and a licence check. Both jobs end in `|| true`, so a green check here means the scan ran, not that it found nothing.
-- **On PR**: `claude-review.yml` runs an automated review. It is skipped for forks and for Dependabot, because GitHub withholds secrets from both, and it is skipped entirely when `ANTHROPIC_API_KEY` is unset rather than failing the check.
+- **On PR**: `claude-review.yml` runs an automated review. It is skipped for forks and for Dependabot, because GitHub withholds secrets from both, and it is skipped entirely when no Claude secret is configured rather than failing the check. Both Claude workflows accept either `ANTHROPIC_API_KEY` (billed through the API) or `CLAUDE_CODE_OAUTH_TOKEN` from `claude setup-token` (billed against a Claude subscription); set whichever one you want as a repository secret.
 
 ### Dependency updates
 
@@ -249,7 +249,7 @@ the changelogs behind the `needs-review` pile and comments a MERGE / MERGE WITH
 CARE / HOLD verdict on each. It is one scheduled invocation over the whole
 pile, not one per pull request: a model reading a lockfile diff knows less than
 CI does, while a model reading a migration guide knows something CI cannot. It
-needs `ANTHROPIC_API_KEY` and skips cleanly without it.
+needs one of the two secrets above and skips cleanly without either.
 
 To trigger a release:
 

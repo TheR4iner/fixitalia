@@ -40,20 +40,24 @@ jobs:
     permissions:
       contents: read
       pull-requests: write
+      # Required by claude-code-action for its default GitHub App
+      # authentication, even though this job passes no `github_token`.
+      id-token: write
     steps:
       # Same preflight as claude-review.yml: the `secrets` context is not
-      # available in a job-level `if`, and the action treats an empty key as an
-      # error rather than as a reason to skip.
-      - name: Check for an API key
+      # available in a job-level `if`, and the action treats an absent
+      # credential as an error rather than as a reason to skip.
+      - name: Check for a credential
         id: preflight
         env:
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
         run: |
-          if [[ -n "$ANTHROPIC_API_KEY" ]]; then
+          if [[ -n "$ANTHROPIC_API_KEY" || -n "$CLAUDE_CODE_OAUTH_TOKEN" ]]; then
             echo 'configured=true' >> "$GITHUB_OUTPUT"
           else
             echo 'configured=false' >> "$GITHUB_OUTPUT"
-            echo '::notice::ANTHROPIC_API_KEY is not set; skipping the triage.'
+            echo '::notice::Neither ANTHROPIC_API_KEY nor CLAUDE_CODE_OAUTH_TOKEN is set; skipping the triage.'
           fi
 
       # Costs nothing and skips the whole job on a quiet week.
@@ -101,7 +105,12 @@ jobs:
       - uses: anthropics/claude-code-action@v1
         if: steps.preflight.outputs.configured == 'true' && steps.find.outputs.found == 'true'
         with:
+          # Set whichever one you have. An API key from the Claude Console
+          # bills through the API; an OAuth token from `claude setup-token`
+          # uses a Claude subscription instead. The action forwards each input
+          # to its own environment variable, so leaving one empty is fine.
           anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
+          claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
           prompt: |
             REPO: ${{ github.repository }}
             PULL REQUESTS TO TRIAGE: ${{ steps.find.outputs.numbers }}
