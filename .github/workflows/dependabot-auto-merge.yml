@@ -42,7 +42,7 @@ jobs:
         with:
           github-token: ${{ secrets.GITHUB_TOKEN }}
 
-      # Two gates. Either one sends the pull request to a human.
+      # Three gates. Any one of them sends the pull request to a human.
       #
       # 1. Semver. For a grouped pull request `update-type` is the largest
       #    bump in the group, so a group containing one major is a major.
@@ -64,6 +64,9 @@ jobs:
         env:
           UPDATE_TYPE: ${{ steps.meta.outputs.update-type }}
           DEPENDENCY_NAMES: ${{ steps.meta.outputs.dependency-names }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
         run: |
           set -euo pipefail
 
@@ -73,6 +76,23 @@ jobs:
           hold=''
           if [[ -z "${DEPENDENCY_NAMES// /}" ]]; then
             hold='dependency-names was empty'
+          fi
+
+          # 3. Provenance. The job-level guard tests the pull request's
+          #    author, which is right for `reopened` but not sufficient on
+          #    `synchronize`: the author stays `dependabot[bot]` when a human
+          #    pushes onto the branch, so the branch could carry hand-written
+          #    commits while the metadata still describes Dependabot's
+          #    original bump. Everything on the branch has to be Dependabot's
+          #    for that metadata to describe what is being merged.
+          if ! authors="$(gh api "repos/$REPO/pulls/$PR_NUMBER/commits" \
+                --paginate --jq '.[].author.login // "unknown"' 2>/dev/null)"; then
+            hold="${hold:+$hold, }could not read the branch's commit authors"
+          else
+            others="$(sort -u <<< "$authors" | grep -vxF 'dependabot[bot]' || true)"
+            if [[ -n "$others" ]]; then
+              hold="${hold:+$hold, }branch carries commits by $(tr '\n' ' ' <<< "$others")"
+            fi
           fi
 
           case "$UPDATE_TYPE" in

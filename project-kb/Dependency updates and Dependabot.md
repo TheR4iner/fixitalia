@@ -79,6 +79,14 @@ request.
 Both now test `github.event.pull_request.user.login`, which is the author and
 does not change with the event.
 
+That fix opens a gap of its own on `synchronize`, which the review of it
+caught: the author stays `dependabot[bot]` when a **human pushes a commit onto
+a Dependabot branch**, so the branch could carry hand-written code while the
+metadata still describes Dependabot's original bump. The old actor-based check
+blocked that case, for the wrong reason but with the right effect. Auto-merge
+therefore has a third gate: every commit on the branch must be authored by
+`dependabot[bot]`, or the pull request goes to a human.
+
 ### The deny list, and why it is not about semver
 
 `surrealdb`, `playwright`, `linkedom`, `csv-parse` and `express` never
