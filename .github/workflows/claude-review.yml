@@ -49,7 +49,12 @@ jobs:
       github.event.pull_request.user.login != 'dependabot[bot]' &&
       github.event.pull_request.draft == false
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    # Kept comfortably above what 40 turns costs, so the turn cap is the
+    # thing that stops a runaway review rather than the wall clock. A job
+    # timeout is a raw cancellation: it kills the `if: always()` reporting
+    # step too, so the run ends with no explanation, which is the opposite of
+    # what the turn cap is for. Measured: 25 turns took 2m39s.
+    timeout-minutes: 30
     permissions:
       contents: read
       pull-requests: write
@@ -145,6 +150,14 @@ jobs:
             - Then the usual: bugs, missing error handling, silent failures,
               type-safety escapes, and test coverage for the behaviour changed.
 
+            **Do not read lockfiles.** `package-lock.json` and
+            `server/package-lock.json` are generated, and a dependency pull
+            request puts thousands of unreviewable lines of integrity hashes
+            in front of you. Read the `package.json` diffs instead, which say
+            what actually changed, and spend the rest of the budget on source.
+            The same goes for anything else generated: `dist/`, coverage
+            output, build artefacts.
+
             Be specific and concise. Skip praise and skip restating the diff.
             If the change is sound, say so briefly rather than inventing
             findings.
@@ -155,7 +168,7 @@ jobs:
             through those tools only; do not return the review as a message.
 
           claude_args: |
-            --max-turns 25
+            --max-turns 40
             --allowedTools "mcp__github_inline_comment__create_inline_comment,Bash(gh pr comment:*),Bash(gh pr diff:*),Bash(gh pr view:*)"
 
       - name: Report what Claude did

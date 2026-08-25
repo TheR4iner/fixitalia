@@ -107,6 +107,22 @@ worst one here: a page that looks right and is wrong.
 Dependabot cannot propose updates for it at all. It is not on the deny list
 because it never reaches one.
 
+### The review cap has to account for lockfiles
+
+The review of the Vite 8 upgrade died with `"subtype": "error_max_turns"` at 25
+turns, having spent them on a 4,000-line regenerated lockfile diff.
+
+Raising the cap alone would have been the wrong fix. The prompt now tells the
+review not to read lockfiles at all: they are generated, they are thousands of
+lines of integrity hashes, and the `package.json` diff beside them says what
+actually changed in a form worth reading. The cap went to 40 as well, for
+headroom on genuinely large source changes.
+
+Worth remembering that the cap fails loudly, which is how this was caught: the
+job goes red and the reporting step names `error_max_turns`. A cap that
+silently truncated the review would have produced a clean-looking approval of a
+review that never finished.
+
 ### Where a model belongs, and where it does not
 
 Not per pull request. A lockfile diff is thousands of lines of integrity
