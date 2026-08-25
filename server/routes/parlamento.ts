@@ -113,6 +113,30 @@ interface SedutaRow {
 // an `organo` parameter and default to plenary, so an existing client sees
 // exactly the results it saw before committee data was ingested.
 
+/**
+ * SQL predicate matching one organo.
+ *
+ * The plenary case tolerates a MISSING organo, and that is load bearing at
+ * deploy time rather than a nicety. server.ts starts listening BEFORE
+ * bootstrapData() runs, so the one-shot organo backfill (~30s on this corpus:
+ * 9.8k sedute, 213k odg rows) executes while the site is already serving
+ * traffic. During that window rows have no organo yet, and a strict
+ * `organo = "assemblea"` matches none of them -- the whole Parlamento section
+ * would go empty and every seduta page 404 until the migration finished.
+ *
+ * Treating "absent" as plenary is exact, not a guess: every row written before
+ * the field existed is a plenary sitting, and committee rows always set it
+ * explicitly at ingest.
+ */
+function organoPredicate(organo: string, column = 'organo'): string {
+  return organo === ORGANO_ASSEMBLEA
+    ? `(${column} = $organo OR ${column} IS NONE)`
+    : `${column} = $organo`
+}
+
+/** Literal form of the same predicate, for queries that hardcode plenary. */
+const ASSEMBLEA_ONLY = '(organo = "assemblea" OR organo IS NONE)'
+
 const ORGANO_ASSEMBLEA = 'assemblea'
 const ORGANO_COMMISSIONE = 'commissione'
 
@@ -149,7 +173,7 @@ router.get('/calendar', async (req: Request, res: Response, next: NextFunction) 
     const bindings: Record<string, unknown> = {}
     const organo = parseOrgano(req.query.organo)
     if (organo) {
-      where.push('organo = $organo')
+      where.push(organoPredicate(organo))
       bindings.organo = organo
     }
     if (chamberFilter) {
@@ -221,7 +245,7 @@ router.get('/sedute', async (req: Request, res: Response, next: NextFunction) =>
     const bindings: Record<string, unknown> = {}
     const organo = parseOrgano(req.query.organo)
     if (organo) {
-      where.push('organo = $organo')
+      where.push(organoPredicate(organo))
       bindings.organo = organo
     }
     if (chamberFilter) {
@@ -345,7 +369,7 @@ router.get(
            source_url, html_url, xml_url, video_url,
            interventi_n, odg_n, body_status
          FROM parlamento_sedute
-         WHERE organo = "assemblea"
+         WHERE ${ASSEMBLEA_ONLY}
            AND chamber = $chamber AND legislatura = $leg AND numero = $num
          LIMIT 1;`,
         { chamber, leg: legislatura, num: numero },
@@ -450,7 +474,7 @@ router.get(
         // plenary sitting AND the first sitting of every committee, and
         // LIMIT 1 would hand back whichever the planner reached first.
         `SELECT id, interventi_n AS n FROM parlamento_sedute
-         WHERE organo = "assemblea"
+         WHERE ${ASSEMBLEA_ONLY}
            AND chamber = $chamber AND legislatura = $leg AND numero = $num
          LIMIT 1;`,
         { chamber, leg: legislatura, num: numero },
@@ -665,10 +689,38 @@ const COMMISSIONE_SEDUTA_FIELDS = `
   organo, organo_cod, organo_nome, organo_slug,
   tipo_resoconto, tipologia, sottotipologia`
 
+/**
+ * Comparable form of a value that may be a SurrealDB DateTime, a Date, or an
+ * ISO string.
+ *
+ * `time::min()` / `time::max()` come back as the SDK's DateTime wrapper, not a
+ * string. Comparing those with `<` or calling localeCompare on them silently
+ * compares object references or throws -- which is how the roster's
+ * "most recent name" merge was picking arbitrarily, and how sort=recenti
+ * crashed with a 500.
+ */
+function timeKey(v: unknown): string {
+  if (v == null) return ''
+  if (typeof v === 'string') return v
+  if (v instanceof Date) return v.toISOString()
+  const asDate = (v as { toDate?: () => Date }).toDate
+  if (typeof asDate === 'function') {
+    try {
+      return asDate.call(v).toISOString()
+    } catch {
+      return ''
+    }
+  }
+  return String(v)
+}
+
 router.get('/commissioni', async (req: Request, res: Response, next: NextFunction) => {
   try {
     const chamberFilter = parseChamber(req.query.chamber)
     const legFilter = parseLegParam(req.query.leg)
+    const year = parseIntParam(req.query.year, 'year', { min: 1948, max: 2100 })
+    const tipoResoconto = parseStringParam(req.query.tipo)
+    const conTesto = req.query.conTesto === 'true'
 
     const where: string[] = ['organo = "commissione"']
     const bindings: Record<string, unknown> = {}
@@ -680,6 +732,23 @@ router.get('/commissioni', async (req: Request, res: Response, next: NextFunctio
       where.push('legislatura = $leg')
       bindings.leg = legFilter
     }
+    // Committees that SAT in this calendar year. Half-open range rather than
+    // time::year(data), so the predicate stays a plain comparison.
+    if (year !== null) {
+      where.push('data >= $yearFrom AND data < $yearTo')
+      bindings.yearFrom = new Date(Date.UTC(year, 0, 1))
+      bindings.yearTo = new Date(Date.UTC(year + 1, 0, 1))
+    }
+    // 'stenografico' (verbatim) vs 'sommario' (summary). Worth filtering on
+    // because the two are not comparable as evidence.
+    if (tipoResoconto === 'stenografico' || tipoResoconto === 'sommario') {
+      where.push('tipo_resoconto = $tipo')
+      bindings.tipo = tipoResoconto
+    }
+    // Only committees with at least one ingested transcript. Much of the
+    // corpus is indexed but not yet fetched, and a reader wants somewhere to
+    // start reading.
+    if (conTesto) where.push('interventi_n IS NOT NONE AND interventi_n > 0')
 
     const rows = await runQuery<
       Array<{
@@ -725,25 +794,47 @@ router.get('/commissioni', async (req: Request, res: Response, next: NextFunctio
         merged.set(key, { ...r })
         continue
       }
-      const newerName = (r.ultima ?? '') > (prev.ultima ?? '')
+      const newerName = timeKey(r.ultima) > timeKey(prev.ultima)
       merged.set(key, {
         ...prev,
         n: prev.n + r.n,
         interventi: (prev.interventi ?? 0) + (r.interventi ?? 0) || null,
         prima:
-          prev.prima && r.prima ? (prev.prima < r.prima ? prev.prima : r.prima) : prev.prima ?? r.prima,
+          prev.prima && r.prima
+            ? (timeKey(prev.prima) < timeKey(r.prima) ? prev.prima : r.prima)
+            : prev.prima ?? r.prima,
         ultima:
-          prev.ultima && r.ultima ? (prev.ultima > r.ultima ? prev.ultima : r.ultima) : prev.ultima ?? r.ultima,
+          prev.ultima && r.ultima
+            ? (timeKey(prev.ultima) > timeKey(r.ultima) ? prev.ultima : r.ultima)
+            : prev.ultima ?? r.ultima,
         organo_nome: newerName ? r.organo_nome : prev.organo_nome,
       })
     }
 
-    const data = [...merged.values()].sort(
-      (a, b) => b.n - a.n || (a.organo_nome ?? '').localeCompare(b.organo_nome ?? ''),
+    const byName = (a: (typeof rows)[number], b: (typeof rows)[number]) =>
+      (a.organo_nome ?? '').localeCompare(b.organo_nome ?? '')
+    const sort = parseStringParam(req.query.sort)
+    const comparators: Record<string, (a: typeof rows[number], b: typeof rows[number]) => number> = {
+      nome: byName,
+      recenti: (a, b) => timeKey(b.ultima).localeCompare(timeKey(a.ultima)) || byName(a, b),
+      interventi: (a, b) => (b.interventi ?? 0) - (a.interventi ?? 0) || byName(a, b),
+      sedute: (a, b) => b.n - a.n || byName(a, b),
+    }
+    const data = [...merged.values()].sort(comparators[sort] ?? comparators.sedute)
+
+    // Facets from the UNFILTERED committee corpus, so choosing a year never
+    // empties the year list.
+    const facetRows = await runQuery<Array<{ anno: number; legislatura: number }>>(
+      `SELECT time::year(data) AS anno, legislatura FROM parlamento_sedute
+       WHERE organo = "commissione" GROUP BY anno, legislatura;`,
+    )
+    const anni = [...new Set((facetRows ?? []).map((r) => r.anno))].sort((a, b) => b - a)
+    const legislature = [...new Set((facetRows ?? []).map((r) => r.legislatura))].sort(
+      (a, b) => b - a,
     )
 
     setPublicCache(res, LISTING_MAXAGE)
-    res.json({ data, total: data.length })
+    res.json({ data, total: data.length, facets: { anni, legislature } })
   } catch (err) {
     next(err)
   }
@@ -766,6 +857,27 @@ router.get(
       if (legFilter !== null) {
         where.push('legislatura = $leg')
         bindings.leg = legFilter
+      }
+      // Calendar year. Expressed as a half-open range rather than
+      // time::year(data) so the predicate stays a plain comparison the index
+      // can serve, instead of a function call evaluated per row.
+      const year = parseIntParam(req.query.year, 'year', { min: 1948, max: 2100 })
+      if (year !== null) {
+        where.push('data >= $yearFrom AND data < $yearTo')
+        bindings.yearFrom = new Date(Date.UTC(year, 0, 1))
+        bindings.yearTo = new Date(Date.UTC(year + 1, 0, 1))
+      }
+      // Sitting kind (Camera taxonomy: indag / audiz2 / altro / sede codes).
+      const tipologia = parseStringParam(req.query.tipologia)
+      if (tipologia) {
+        where.push('tipologia = $tipologia')
+        bindings.tipologia = tipologia
+      }
+      // Hide sittings whose transcript has not been fetched yet. Much of the
+      // corpus is indexed but not ingested, and a reader looking for something
+      // to read should be able to say so.
+      if (req.query.conTesto === 'true') {
+        where.push('interventi_n IS NOT NONE AND interventi_n > 0')
       }
       // Title filter, so a committee with 400+ sittings is navigable without
       // paging through it. Scoped to one committee already, so the CONTAINS
@@ -792,6 +904,25 @@ router.get(
         ),
       ])
 
+      // Facet values come from the committee's WHOLE history, not the current
+      // filter, so selecting a year does not empty the year list.
+      const facetRows = await runQuery<
+        Array<{ anno: number; tipologia: string | null; legislatura: number; n: number }>
+      >(
+        `SELECT time::year(data) AS anno, tipologia, legislatura, count() AS n
+         FROM parlamento_sedute
+         WHERE organo = "commissione" AND organo_slug = $slug
+         GROUP BY anno, tipologia, legislatura;`,
+        { slug },
+      )
+      const anni = [...new Set((facetRows ?? []).map((r) => r.anno))].sort((a, b) => b - a)
+      const legislature = [...new Set((facetRows ?? []).map((r) => r.legislatura))].sort(
+        (a, b) => b - a,
+      )
+      const tipologie = [
+        ...new Set((facetRows ?? []).map((r) => r.tipologia).filter(Boolean)),
+      ].sort() as string[]
+
       const total = totalRows?.[0]?.n ?? 0
       setPublicCache(res, LISTING_MAXAGE)
       res.json({
@@ -800,6 +931,7 @@ router.get(
         pageSize,
         total,
         has_more: offset + (rows?.length ?? 0) < total,
+        facets: { anni, legislature, tipologie },
       })
     } catch (err) {
       next(err)
@@ -998,6 +1130,9 @@ router.get('/search', async (req: Request, res: Response, next: NextFunction) =>
     // not have to remember to set both and cannot ask for the contradictory
     // combination of a committee slug inside the plenary corpus.
     const commissione = parseScope(req.query.commissione)
+    const searchLeg = parseLegParam(req.query.leg)
+    const fromYear = parseIntParam(req.query.from, 'from', { min: 1948, max: 2100 })
+    const toYear = parseIntParam(req.query.to, 'to', { min: 1948, max: 2100 })
     const page = clampInt(req.query.page, 1, 1, 100)
     const pageSize = clampInt(req.query.pageSize, 20, 1, 50)
     const offset = (page - 1) * pageSize
@@ -1076,7 +1211,7 @@ router.get('/search', async (req: Request, res: Response, next: NextFunction) =>
       if (organo && !commissione) {
         // Denormalised on parlamento_riferimenti, so this stays a plain
         // column predicate rather than a seduta link traversal.
-        refWhere.push('organo = $organo')
+        refWhere.push(organoPredicate(organo))
         bindings.organo = organo
       }
       rows =
@@ -1111,6 +1246,18 @@ router.get('/search', async (req: Request, res: Response, next: NextFunction) =>
       // q-only or q+cita path.
       const baseWhere: string[] = []
       if (chamberFilter) baseWhere.push('seduta_id.chamber = $chamber')
+      if (searchLeg !== null) {
+        baseWhere.push('seduta_id.legislatura = $searchLeg')
+        bindings.searchLeg = searchLeg
+      }
+      if (fromYear !== null) {
+        baseWhere.push('seduta_id.data >= $fromDate')
+        bindings.fromDate = new Date(Date.UTC(fromYear, 0, 1))
+      }
+      if (toYear !== null) {
+        baseWhere.push('seduta_id.data < $toDate')
+        bindings.toDate = new Date(Date.UTC(toYear + 1, 0, 1))
+      }
       if (commissione) {
         baseWhere.push('seduta_id.organo_slug = $commissione')
         bindings.commissione = commissione
@@ -1459,7 +1606,7 @@ router.get('/legislature/:n', async (req: Request, res: Response, next: NextFunc
            time::max(data) AS data_fine,
            count() AS n
          FROM parlamento_sedute
-         WHERE organo = "assemblea" AND legislatura = $leg AND chamber = "camera"
+         WHERE ${ASSEMBLEA_ONLY} AND legislatura = $leg AND chamber = "camera"
          GROUP ALL;`,
         { leg },
       ),
@@ -1469,7 +1616,7 @@ router.get('/legislature/:n', async (req: Request, res: Response, next: NextFunc
            time::max(data) AS data_fine,
            count() AS n
          FROM parlamento_sedute
-         WHERE organo = "assemblea" AND legislatura = $leg AND chamber = "senato"
+         WHERE ${ASSEMBLEA_ONLY} AND legislatura = $leg AND chamber = "senato"
          GROUP ALL;`,
         { leg },
       ),
@@ -1989,7 +2136,7 @@ router.get('/odg/search', async (req: Request, res: Response, next: NextFunction
 
     const organo = parseOrgano(req.query.organo)
     if (organo) {
-      where.push('organo = $organo')
+      where.push(organoPredicate(organo))
       bindings.organo = organo
     }
     if (legFilter !== null) {
@@ -2012,7 +2159,7 @@ router.get('/odg/search', async (req: Request, res: Response, next: NextFunction
     // already excluded by the filter above.
     const notOk = await runQuery<Array<{ id: unknown }>>(
       organo
-        ? `SELECT id FROM parlamento_sedute WHERE body_status != "ok" AND organo = $organo;`
+        ? `SELECT id FROM parlamento_sedute WHERE body_status != "ok" AND ${organoPredicate(organo)};`
         : `SELECT id FROM parlamento_sedute WHERE body_status != "ok";`,
       organo ? { organo } : {},
     )

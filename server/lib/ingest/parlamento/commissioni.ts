@@ -94,20 +94,26 @@ async function listPending(
   chamber: Chamber,
   legislatura: number,
   refresh: boolean,
+  onlyCod?: string[],
 ): Promise<string[]> {
   // "missing" joins "ok" as a terminal state: the document is not published
   // upstream, so re-requesting it daily buys nothing. --refresh ignores the
   // filter entirely and re-attempts everything.
   const statusFilter = refresh ? '' : 'AND body_status NOT IN ["ok", "missing"]'
+  // --only-cod has to narrow the BODY pass too, not just discovery. Without
+  // this, `--only-cod 4-226 --skip-index` quietly queues every pending sitting
+  // in the legislature (6,304 of them for Senato leg 19) instead of the 171
+  // the operator asked for -- days of throttled fetching instead of minutes.
+  const codFilter = onlyCod?.length ? 'AND organo_cod IN $cods' : ''
   const rows =
     (await runQuery<PendingRow[]>(
       // `data` is projected only because SurrealDB requires an ORDER BY
       // idiom to appear in the selection; the value itself is unused.
       `SELECT id, body_status, data FROM parlamento_sedute
        WHERE organo = "commissione" AND chamber = $chamber AND legislatura = $leg
-         ${statusFilter}
+         ${statusFilter} ${codFilter}
        ORDER BY data ASC;`,
-      { chamber, leg: legislatura },
+      { chamber, leg: legislatura, ...(onlyCod?.length ? { cods: onlyCod } : {}) },
     )) ?? []
   // The SDK hands back RecordId instances; `.id` is the scope token the
   // session ingests take. Reading it here avoids depending on a SurrealQL
@@ -198,7 +204,12 @@ async function runChamber(
   // ---- Body pass --------------------------------------------------------
   let pending: string[]
   try {
-    pending = await listPending(chamber, legislatura, options.refresh ?? false)
+    pending = await listPending(
+      chamber,
+      legislatura,
+      options.refresh ?? false,
+      options.onlyCod,
+    )
   } catch (err) {
     return emptyResult(
       chamber,
