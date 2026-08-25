@@ -389,6 +389,32 @@ accuracy budget.
 
 ## History
 
+- **2026-08-25 (shipped to production, v0.9.0)** -- Deployed and ingesting.
+  Three findings worth carrying forward:
+
+  - **The boot-time migration takes MINUTES on the VPS, not the ~30s it takes
+    on the dev box.** server.ts starts listening before bootstrapData() runs,
+    so for that whole window every plenary row has organo = NULL. The
+    tolerant plenary predicate added the same day is what kept the live site
+    up: mid-migration, /sedute, the seduta detail page and /calendar were all
+    verified serving normally against a corpus where organo was null on all
+    9,817 rows. Without it the entire Parlamento section would have been empty
+    on a public site for minutes. Any future boot-time migration over this
+    corpus needs the same treatment -- assume minutes, and assume traffic.
+  - Camera leg 19 on production: 1,805 sittings discovered in 88s (index
+    pass); body pass 1,799 ok / 6 upstream-missing / 0 errors in 1,353s
+    (~0.75s per sitting) and cost **~1 GB** of disk. That is well under the
+    2.1 GB the char-based model predicted, so treat that model as a ceiling
+    rather than an estimate.
+  - Index passes on production must be started with `docker compose exec -d`.
+    Run without -d they die with the SSH session, and an index pass that is
+    killed before its final write loses everything it scraped.
+  - Senato deliberately NOT run on the VPS: no exit-IP rotation there, and a
+    WAF block during local testing (at a throttle lowered below the defaults)
+    confirmed how quickly that wall arrives.
+
+
+
 - **2026-08-24 (initial implementation)** -- Full ingest path for both
   chambers, schema migration, API, reader UI, 30 tests.
   - Verified end to end against the dev DB: 49 Camera leg-19 sittings
