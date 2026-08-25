@@ -129,21 +129,30 @@ jobs:
         run: |
           set -euo pipefail
 
-          # A check that has not been created yet makes `gh pr checks` exit
-          # non-zero rather than wait, so give the workflows a moment to
-          # register before watching them.
-          for attempt in 1 2 3 4 5 6; do
-            if gh pr checks "$PR_URL" --required >/dev/null 2>&1; then
+          # Wait for the required checks to EXIST, which is a different
+          # question from whether they have passed. Without `--json`,
+          # `gh pr checks` exits non-zero for a check that is merely still
+          # running, so looping on its exit status would block until CI had
+          # actually finished and then hard-fail on a slow-but-healthy run,
+          # reporting "no checks appeared" about a check that had appeared
+          # and was simply in progress. With `--json` it exits 0 and returns
+          # the array whatever the state, which is the distinction needed
+          # here. Verified against a passing and a failing pull request.
+          for attempt in $(seq 1 10); do
+            found="$(gh pr checks "$PR_URL" --required --json name 2>/dev/null || echo '[]')"
+            if [[ "$(jq 'length' <<< "$found" 2>/dev/null || echo 0)" -gt 0 ]]; then
               break
             fi
-            if (( attempt == 6 )); then
-              echo "::error::No required checks appeared on $PR_URL after five minutes. Branch protection must require at least one check for this workflow to gate on."
+            if (( attempt == 10 )); then
+              echo "::error::No required check has been created on $PR_URL after five minutes. Branch protection must require at least one check for this workflow to gate on."
               exit 1
             fi
-            echo "No required checks yet; retrying in 50s (attempt $attempt/6)."
-            sleep 50
+            echo "No required check registered yet; retrying in 30s (attempt $attempt/10)."
+            sleep 30
           done
 
+          # Now do the actual waiting, which has no timeout of its own beyond
+          # the job's.
           gh pr checks "$PR_URL" --watch --fail-fast --required --interval 30
 
       - name: Merge
