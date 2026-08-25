@@ -1,0 +1,121 @@
+name: Dependabot auto-merge
+
+# Merges Dependabot's low-risk pull requests once CI is green, and leaves the
+# rest for a human.
+#
+# Why `pull_request_target` and not `pull_request`: a workflow run triggered by
+# Dependabot on the `pull_request` event gets a READ-ONLY `GITHUB_TOKEN` and no
+# repository secrets, so it cannot merge anything. `pull_request_target` runs in
+# the base repository's context with a writable token.
+#
+# That trigger is dangerous when it checks out and executes the pull request's
+# code, because the code is contributor-controlled and the token is not. This
+# workflow never checks out anything. It reads metadata from the Dependabot API
+# and calls `gh`. Keep it that way: do not add `actions/checkout` here.
+
+on:
+  pull_request_target:
+    types: [opened, synchronize, reopened]
+
+permissions:
+  contents: write
+  pull-requests: write
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  auto-merge:
+    name: Auto-merge
+    if: github.actor == 'dependabot[bot]'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Read Dependabot metadata
+        id: meta
+        uses: dependabot/fetch-metadata@v2
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+
+      # Two gates. Either one sends the pull request to a human.
+      #
+      # 1. Semver. For a grouped pull request `update-type` is the largest
+      #    bump in the group, so a group containing one major is a major.
+      #
+      # 2. The deny list. Auto-merge is a bet that a green pipeline means a
+      #    working application, and for these packages that bet does not
+      #    hold. The backend tests exercise the ingest parsers against
+      #    captured fixtures, not against live upstream pages or a live
+      #    database, so a change in how `linkedom` handles malformed markup
+      #    or in what shape the `surrealdb` client returns can pass every
+      #    check and break ingest silently. That is the failure this project
+      #    cares about most: a page that looks right and is wrong.
+      #
+      #    Add to the list when a runtime dependency's correctness is proved
+      #    by something CI does not run. Remove from it when real coverage
+      #    arrives.
+      - name: Decide
+        id: decide
+        env:
+          UPDATE_TYPE: ${{ steps.meta.outputs.update-type }}
+          DEPENDENCY_NAMES: ${{ steps.meta.outputs.dependency-names }}
+        run: |
+          set -euo pipefail
+
+          DENY_LIST='surrealdb playwright linkedom csv-parse express'
+
+          # No metadata means no basis for a decision, so do not merge on it.
+          hold=''
+          if [[ -z "${DEPENDENCY_NAMES// /}" ]]; then
+            hold='dependency-names was empty'
+          fi
+
+          case "$UPDATE_TYPE" in
+            version-update:semver-patch|version-update:semver-minor) ;;
+            *) hold="$UPDATE_TYPE" ;;
+          esac
+
+          # `dependency-names` is comma-separated, and a grouped pull request
+          # lists every member, so one denied package holds the whole group.
+          IFS=',' read -ra names <<< "$DEPENDENCY_NAMES"
+          for raw in "${names[@]}"; do
+            name="$(echo "$raw" | tr -d '[:space:]')"
+            [[ -n "$name" ]] || continue
+            for denied in $DENY_LIST; do
+              if [[ "$name" == "$denied" ]]; then
+                hold="${hold:+$hold, }not covered by CI: $name"
+              fi
+            done
+          done
+
+          if [[ -z "$hold" ]]; then
+            echo 'merge=true' >> "$GITHUB_OUTPUT"
+            echo "Patch or minor bump of: $DEPENDENCY_NAMES -- eligible."
+          else
+            echo 'merge=false' >> "$GITHUB_OUTPUT"
+            echo "Holding $DEPENDENCY_NAMES for review ($hold)."
+          fi
+
+      - name: Label majors for review
+        if: steps.decide.outputs.merge == 'false'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR_URL: ${{ github.event.pull_request.html_url }}
+        run: gh pr edit "$PR_URL" --add-label 'needs-review' || true
+
+      # Waits for every check on the head commit. Exits non-zero the moment one
+      # fails, which leaves the pull request open and unmerged.
+      - name: Wait for CI
+        if: steps.decide.outputs.merge == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR_URL: ${{ github.event.pull_request.html_url }}
+        run: gh pr checks "$PR_URL" --watch --fail-fast --interval 30
+
+      - name: Merge
+        if: steps.decide.outputs.merge == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR_URL: ${{ github.event.pull_request.html_url }}
+        run: gh pr merge "$PR_URL" --squash --delete-branch

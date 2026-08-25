@@ -13,7 +13,7 @@ Consult `project-kb/` for topic-specific notes on bugs, features, and architectu
 - **Frontend**: Vite 7 + React 19 + TypeScript (strict), React Router 7, Tailwind v4 + shadcn/ui (`radix-nova` style). Source under `src/`.
 - **Backend**: Express 5 + TypeScript (via `tsx`). Source under `server/`. Exposes `/api/*`.
 - **Data**: SurrealDB v2.1.4 sidecar (rocksdb storage, bind-mounted at `./server/data/surreal`). Reachable inside the compose network as `fixitalia-surrealdb:8000`.
-- **CI**: GitHub Actions, via thin caller stubs that reference reusable workflows at `TheR4iner/reusable-workflows@v1`. `ci.yml` runs CI (lint/type/test/build) on push/PR to `main` and `develop` but does **not** publish. `release.yml` publishes the `ghcr.io/TheR4iner/fixitalia-{frontend,backend}` images and deploys to the VPS on `v*` tags -- the only path that publishes or deploys.
+- **CI**: GitHub Actions, vendored into `.github/workflows/` (the shared `TheR4iner/reusable-workflows` repo is private, and a public caller cannot resolve it). `ci.yml` runs CI (lint/type/test/build) on push/PR to `main` and `develop` but does **not** publish. `release.yml` publishes the `ghcr.io/TheR4iner/fixitalia-{frontend,backend}` images and deploys to the VPS on `v*` tags -- the only path that publishes or deploys.
 - **Testing**: Vitest + Testing Library (frontend and backend). Happy DOM as the test environment.
 
 ## Development environment
@@ -96,7 +96,8 @@ with `appalti` or `opere-incompiute` for a working site.
 │   ├── scripts/                 # Ingest CLI and one-off probes
 │   ├── data/                    # Persisted files -- gitignored
 │   └── test/                    # Backend tests
-├── .github/workflows/           # Thin caller stubs for shared reusable workflows
+├── .github/actions/             # Local composite actions (Claude spend gate)
+├── .github/workflows/           # CI, release, security, Claude review, Dependabot automation
 └── project-kb/                  # Long-lived notes per topic (see below)
 ```
 
@@ -198,15 +199,91 @@ this repo with real legal exposure.
 
 ## CI / CD
 
-All workflows are thin caller stubs that reference reusable workflows in the private repo `TheR4iner/reusable-workflows@v1`. The actual CI logic lives there; updating it once benefits every project.
+The workflows used to be thin caller stubs pointing at the private repo
+`TheR4iner/reusable-workflows@v1`. They are now **vendored into this
+repository**: the shared repo is private, so a public caller could not resolve
+it and every run failed before starting a job. Inlining also means a fork's CI
+works without access to anything outside this repository. Edit the workflow
+files here directly; there is no upstream to pick changes up from.
 
-- **On push/PR** to `main` or `develop`: `ci.yml` calls `web-ci.yml` (frontend + backend lint, type-check, test, build). Both must pass. `ci.yml` does **not** publish images -- pushing to `main` builds and verifies only.
-- **On `v*` tag push**: `release.yml` calls `web-docker-publish.yml` and publishes the images to `ghcr.io/TheR4iner/fixitalia-{frontend,backend}` -- semver tags (`{major}`, `{major}.{minor}`, `{version}`), a short-SHA tag, and `latest` -- then runs the `deploy` job (syncs SurrealDB credentials to the VPS, then SSHes in to pull + restart). Tagging is the only path that publishes images or deploys. Create release tags with `git tag v1.2.3 && git push --tags`.
-- **Weekly (Mondays 09:00 UTC) and on push/PR**: `security.yml` calls `web-security.yml` (`npm audit` + license check).
+- **On push/PR** to `main` or `develop`: `ci.yml` runs the frontend job (lint, `tsc --noEmit`, tests, build) and the backend job (type-check, tests), then a `ci-success` gate that fails if either did. `ci.yml` does **not** publish images -- pushing to `main` builds and verifies only.
+- **On `v*` tag push**: `release.yml` publishes the images to `ghcr.io/TheR4iner/fixitalia-{frontend,backend}` -- semver tags (`{major}`, `{major}.{minor}`, `{version}`), a short-SHA tag, and `latest` -- then runs the `deploy` job (syncs the SurrealDB login to the VPS, then SSHes in to pull + restart). Tagging is the only path that publishes images or deploys. Create release tags with `git tag v1.2.3 && git push --tags`.
+- **Weekly (Mondays 09:00 UTC) and on push/PR**: `security.yml` runs `npm audit` and a licence check. Both jobs end in `|| true`, so a green check here means the scan ran, not that it found nothing.
+- **On PR**: `claude-review.yml` runs an automated review, on `opened`, `reopened` and `ready_for_review` but deliberately not on `synchronize`. It is skipped for drafts, for forks and for Dependabot, because GitHub withholds secrets from the last two, and it is skipped entirely when no Claude secret is configured rather than failing the check.
 
-**One-time setup**: the `reusable-workflows` repo is private. For this caller to access it, the shared repo's *Settings -> Actions -> General -> Access* must be set to *"Accessible from repositories owned by the user TheR4iner"*. This is a per-shared-repo setting, configured once and benefits all callers.
+### Dependency updates
 
-To pick up CI improvements pushed to `reusable-workflows`, no action is needed; `@v1` floats and auto-updates on non-breaking releases. To pin to an exact version, change `@v1` to `@v1.2.3` in the caller files.
+`.github/dependabot.yml` configures grouped weekly version updates for both npm
+workspaces plus monthly `github-actions` updates. The config file matters for
+coverage, not just noise: without one, Dependabot runs in security-only mode,
+which is alert-driven and best-effort per manifest. In August 2026 it opened
+six pull requests for `server/package-lock.json` and never dispatched a single
+job for the root one, leaving ten frontend advisories unattempted with nothing
+to signal it. Scheduled version updates are driven by a cron over every
+directory in the config instead.
+
+The config also sets a `cooldown`, so no version update is proposed until the
+release has been on the registry for a few days. That is not about broken
+releases, which CI catches, but about compromised ones: in every major npm
+supply-chain incident the malicious version was live for hours to a couple of
+days before being pulled. Cooldown deliberately does not apply to security
+updates, where the advisory is already public and waiting only costs exposure.
+
+`dependabot-auto-merge.yml` squash-merges Dependabot's patch and minor pull
+requests once every check on the head commit passes, and labels the rest
+`needs-review` instead. Two things are held back: any major, and anything
+touching the deny list in that file (`surrealdb`, `playwright`, `linkedom`,
+`csv-parse`, `express`). The deny list exists because auto-merge is a bet that
+a green pipeline means a working application, and for the ingest path that bet
+does not hold: those tests run against captured fixtures, not against live
+upstream pages or a live database, so a behavioural change in HTML parsing or
+in a client's result shape passes every check and breaks ingest silently. Add
+to the list when a runtime dependency's correctness rests on something CI does
+not run; remove from it when real coverage arrives.
+
+The workflow runs on `pull_request_target` because Dependabot-triggered
+`pull_request` runs get a read-only token; it therefore never checks out the
+pull request's code, and must stay that way.
+
+`dependency-triage.yml` picks up what auto-merge refused. Once a week it reads
+the changelogs behind the `needs-review` pile and comments a MERGE / MERGE WITH
+CARE / HOLD verdict on each. It is one scheduled invocation over the whole
+pile, not one per pull request: a model reading a lockfile diff knows less than
+CI does, while a model reading a migration guide knows something CI cannot.
+
+### Claude workflows: authentication and spend
+
+Both Claude workflows accept either secret, and skip cleanly when neither is
+set:
+
+- `ANTHROPIC_API_KEY`, a key from the Claude Console, billed through the API.
+- `CLAUDE_CODE_OAUTH_TOKEN`, from `claude setup-token`, billed against a Claude
+  subscription.
+
+Neither requires the Claude GitHub App to be installed. Both pass
+`github_token: ${{ secrets.GITHUB_TOKEN }}`, which is the documented way to run
+the action without the app; the cost is that comments arrive from
+`github-actions[bot]` rather than from Claude, and `@claude` mentions do not
+work. Delete that one line in a workflow to authenticate as the app instead,
+after installing it.
+
+**Spend is capped inside the workflows, because nothing else caps it.** GitHub
+has no token budget, and a subscription-billed run has no per-repository limit
+on the Anthropic side either. Three mechanisms stand in for one:
+
+- `.github/actions/claude-budget` refuses to start Claude once a workflow has
+  invoked it more than N times in the trailing seven days (20 for review, 3 for
+  triage). It counts *invocations*, by inspecting the `Run Claude` step of past
+  runs, not workflow runs: a run that skipped Claude must not consume budget,
+  or one week over the limit would lock the workflow out forever.
+- `--max-turns` bounds a single invocation (25 for review, 60 for triage), and
+  `timeout-minutes` bounds the job.
+- The review trigger omits `synchronize`, which would otherwise buy a full
+  review on every push to a pull request branch. That is the largest avoidable
+  cost in the whole setup.
+
+Raising a cap is a one-line change in the calling workflow. A blocked run says
+so with a `::warning::` rather than failing.
 
 To trigger a release:
 

@@ -1,0 +1,102 @@
+version: 2
+
+# Without this file Dependabot still runs, but only in its default
+# "security updates" mode: alert-driven, best-effort, and nothing at all on a
+# schedule. That mode is not reliable coverage. In August 2026 it dispatched
+# six update jobs for server/package-lock.json and not one for the root
+# lockfile, which sat on ten advisories -- including an unauthenticated RCE in
+# React Router -- with no pull request and no signal that it had been skipped.
+#
+# The configuration below turns on scheduled version updates as well, and
+# groups them so that a routine week produces two or three pull requests
+# instead of twenty.
+
+updates:
+  # Both npm workspaces. Dependabot opens separate pull requests per
+  # directory, so the groups below apply within each one.
+  - package-ecosystem: npm
+    directories:
+      - '/'
+      - '/server'
+    schedule:
+      interval: weekly
+      day: monday
+      time: '06:00'
+      timezone: Europe/Rome
+    open-pull-requests-limit: 10
+    commit-message:
+      prefix: 'build(deps)'
+      prefix-development: 'build(deps-dev)'
+
+    # Quarantine. Nothing is proposed until the release has been on the
+    # registry for a few days.
+    #
+    # This is not about broken releases -- CI catches those. It is about
+    # compromised ones. In event-stream (2018), ua-parser-js (2021),
+    # node-ipc (2022) and the 2025 npm token-stealing worm, the malicious
+    # version was live for hours to a couple of days before being pulled.
+    # Auto-merging with no cooldown makes this repository's pipeline the
+    # fastest possible path from a hijacked npm publish into `main`.
+    #
+    # Only version updates are held. Security updates ignore cooldown
+    # entirely, which is correct: the advisory is already public, so waiting
+    # buys nothing and costs exposure.
+    cooldown:
+      default-days: 7
+      semver-patch-days: 3
+      semver-minor-days: 5
+      semver-major-days: 7
+
+    groups:
+      # Routine weekly maintenance. Development tooling moves fast and
+      # breaks nothing that CI will not catch, so majors are welcome here.
+      dev-dependencies:
+        applies-to: version-updates
+        dependency-type: development
+        update-types: [minor, patch, major]
+
+      # Runtime dependencies get the cautious treatment: patch and minor
+      # travel together, majors arrive alone so they can be read properly.
+      #
+      # The excluded packages are the ones CI does not actually vouch for.
+      # See the deny list in dependabot-auto-merge.yml for why; keeping them
+      # out of the group means each arrives as its own pull request rather
+      # than blocking the merge of a group it happens to be sharing.
+      production-dependencies:
+        applies-to: version-updates
+        dependency-type: production
+        update-types: [minor, patch]
+        exclude-patterns:
+          - 'surrealdb'
+          - 'playwright'
+          - 'linkedom'
+          - 'csv-parse'
+          - 'express'
+
+      # Security updates are grouped too, so an advisory storm in the
+      # transitive tree is one pull request rather than five.
+      security-development:
+        applies-to: security-updates
+        dependency-type: development
+      security-production:
+        applies-to: security-updates
+        dependency-type: production
+
+  # Action versions in .github/workflows. These are pinned by tag and
+  # otherwise never move, which is how a repository ends up on a
+  # deprecated runner image.
+  - package-ecosystem: github-actions
+    directory: '/'
+    schedule:
+      interval: monthly
+    open-pull-requests-limit: 5
+    commit-message:
+      prefix: 'ci(deps)'
+    # Actions are a supply-chain surface too: a compromised action runs with
+    # this repository's token. tj-actions/changed-files (March 2025) is the
+    # reference case.
+    cooldown:
+      default-days: 7
+    groups:
+      github-actions:
+        patterns: ['*']
