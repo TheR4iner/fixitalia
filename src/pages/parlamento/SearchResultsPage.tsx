@@ -77,14 +77,22 @@ export default function SearchResultsPage() {
   const rawScope = params.get('organo')
   const scope: Organo | 'tutti' =
     rawScope === 'commissione' || rawScope === 'tutti' ? rawScope : 'assemblea'
+  // A committee scope overrides the organo toggle: asking for one committee
+  // already implies the committee corpus.
+  const commissione = params.get('commissione') ?? undefined
 
-  const queryKey = ['parlamento/search', q, chamber, scope] as const
+  const queryKey = ['parlamento/search', q, chamber, scope, commissione] as const
   const result = useQuery(
     queryKey,
     () =>
       q.length < 2
         ? Promise.resolve({ data: [], page: 1, pageSize: 0, total: 0, q })
-        : searchParlamento(q, { chamber: chamber ?? undefined, page: 1, organo: scope }),
+        : searchParlamento(q, {
+            chamber: chamber ?? undefined,
+            page: 1,
+            organo: commissione ? undefined : scope,
+            commissione,
+          }),
     { ttlMs: 5 * 60 * 1000 },
   )
 
@@ -101,7 +109,8 @@ export default function SearchResultsPage() {
     if (next.length < 2) return
     const np = new URLSearchParams({ q: next })
     if (chamber) np.set('chamber', chamber)
-    if (scope !== 'assemblea') np.set('organo', scope)
+    if (commissione) np.set('commissione', commissione)
+    else if (scope !== 'assemblea') np.set('organo', scope)
     setParams(np)
   }
 
@@ -132,6 +141,31 @@ export default function SearchResultsPage() {
         </Button>
       </form>
 
+      {commissione ? (
+        <div className="flex flex-wrap items-center gap-2 text-sm">
+          <span className="text-muted-foreground">
+            {t.parlamento.commissioni.searchInside}:
+          </span>
+          <Link
+            to={`/parlamento/commissioni/${encodeURIComponent(commissione)}`}
+            className="rounded-md border border-border px-2 py-1 font-medium hover:bg-muted"
+          >
+            {result.data?.data?.[0]?.organo_nome ?? commissione}
+          </Link>
+          <button
+            type="button"
+            onClick={() => {
+              const np = new URLSearchParams(params)
+              np.delete('commissione')
+              np.set('organo', 'commissione')
+              setParams(np)
+            }}
+            className="text-muted-foreground underline underline-offset-4 hover:text-foreground"
+          >
+            {t.parlamento.commissioni.openInSearch}
+          </button>
+        </div>
+      ) : (
       <fieldset className="flex flex-wrap items-center gap-2">
         <legend className="sr-only">{t.parlamento.commissioni.searchScopeLegend}</legend>
         {(
@@ -157,6 +191,7 @@ export default function SearchResultsPage() {
           </button>
         ))}
       </fieldset>
+      )}
 
       {q.length < 2 ? null : result.status === 'loading' ? (
         <div className="space-y-3">
@@ -237,14 +272,25 @@ export default function SearchResultsPage() {
                             {formatDate(h.data)}
                           </Link>
                           <span aria-hidden="true">·</span>
-                          <Link
-                            to={sedutaHref}
-                            className="underline decoration-muted-foreground/30 underline-offset-4 hover:decoration-foreground"
-                          >
-                            {isCommissione && h.organo_nome
-                              ? h.organo_nome
-                              : `seduta n. ${h.numero}`}
-                          </Link>
+                          {/* For a committee hit the committee name is the
+                              useful anchor, and it points at the committee
+                              rather than the single sitting -- that is the
+                              navigation step a reader actually wants next. */}
+                          {isCommissione && h.organo_slug ? (
+                            <Link
+                              to={`/parlamento/commissioni/${encodeURIComponent(h.organo_slug)}`}
+                              className="underline decoration-muted-foreground/30 underline-offset-4 hover:decoration-foreground"
+                            >
+                              {h.organo_nome ?? 'commissione'}
+                            </Link>
+                          ) : (
+                            <Link
+                              to={sedutaHref}
+                              className="underline decoration-muted-foreground/30 underline-offset-4 hover:decoration-foreground"
+                            >
+                              seduta n. {h.numero}
+                            </Link>
+                          )}
                         </span>
                       </div>
                       {h.odg_titolo ? (

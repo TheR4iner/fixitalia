@@ -705,9 +705,42 @@ router.get('/commissioni', async (req: Request, res: Response, next: NextFunctio
       bindings,
     )
 
-    const data = (rows ?? [])
-      .slice()
-      .sort((a, b) => b.n - a.n || (a.organo_nome ?? '').localeCompare(b.organo_nome ?? ''))
+    // Merge on organo_slug, the stable key.
+    //
+    // A committee's OFFICIAL NAME changes between legislatures while its code
+    // stays put -- camera-39 is "Commissione parlamentare di inchiesta sulle
+    // attivita' illecite connesse al ciclo dei rifiuti" in one legislature and
+    // carries "e su illeciti ambientali ad esse correlati" in another. Grouping
+    // on the name in SQL therefore splits one committee into several cards with
+    // partial counts, which reads as duplicates. The detail route already keys
+    // on the slug alone, so those cards all led to the same place.
+    //
+    // The displayed name is taken from the most recent group, so a committee is
+    // labelled as Parliament last called it.
+    const merged = new Map<string, (typeof rows)[number]>()
+    for (const r of rows ?? []) {
+      const key = `${r.chamber}:${r.organo_slug}`
+      const prev = merged.get(key)
+      if (!prev) {
+        merged.set(key, { ...r })
+        continue
+      }
+      const newerName = (r.ultima ?? '') > (prev.ultima ?? '')
+      merged.set(key, {
+        ...prev,
+        n: prev.n + r.n,
+        interventi: (prev.interventi ?? 0) + (r.interventi ?? 0) || null,
+        prima:
+          prev.prima && r.prima ? (prev.prima < r.prima ? prev.prima : r.prima) : prev.prima ?? r.prima,
+        ultima:
+          prev.ultima && r.ultima ? (prev.ultima > r.ultima ? prev.ultima : r.ultima) : prev.ultima ?? r.ultima,
+        organo_nome: newerName ? r.organo_nome : prev.organo_nome,
+      })
+    }
+
+    const data = [...merged.values()].sort(
+      (a, b) => b.n - a.n || (a.organo_nome ?? '').localeCompare(b.organo_nome ?? ''),
+    )
 
     setPublicCache(res, LISTING_MAXAGE)
     res.json({ data, total: data.length })
@@ -733,6 +766,14 @@ router.get(
       if (legFilter !== null) {
         where.push('legislatura = $leg')
         bindings.leg = legFilter
+      }
+      // Title filter, so a committee with 400+ sittings is navigable without
+      // paging through it. Scoped to one committee already, so the CONTAINS
+      // scan is over hundreds of rows, not the whole table.
+      const titleQuery = parseStringParam(req.query.q)
+      if (titleQuery.length >= 2) {
+        where.push('string::lowercase(titolo ?? "") CONTAINS $q')
+        bindings.q = titleQuery.toLowerCase()
       }
       const whereSql = `WHERE ${where.join(' AND ')}`
 
@@ -953,6 +994,10 @@ router.get('/search', async (req: Request, res: Response, next: NextFunction) =>
     }
     const chamberFilter = parseChamber(req.query.chamber)
     const organo = parseOrgano(req.query.organo)
+    // Narrow to one committee. Implies organo=commissione, so a caller does
+    // not have to remember to set both and cannot ask for the contradictory
+    // combination of a committee slug inside the plenary corpus.
+    const commissione = parseScope(req.query.commissione)
     const page = clampInt(req.query.page, 1, 1, 100)
     const pageSize = clampInt(req.query.pageSize, 20, 1, 50)
     const offset = (page - 1) * pageSize
@@ -1021,7 +1066,14 @@ router.get('/search', async (req: Request, res: Response, next: NextFunction) =>
       if (chamberFilter) {
         refWhere.push('chamber = $chamber')
       }
-      if (organo) {
+      if (commissione) {
+        // parlamento_riferimenti carries organo but not organo_slug, so this
+        // one predicate does traverse the seduta link. It is bounded by the
+        // citation lookup that precedes it (tens of rows), not by the corpus.
+        refWhere.push('seduta.organo_slug = $commissione')
+        bindings.commissione = commissione
+      }
+      if (organo && !commissione) {
         // Denormalised on parlamento_riferimenti, so this stays a plain
         // column predicate rather than a seduta link traversal.
         refWhere.push('organo = $organo')
@@ -1059,7 +1111,10 @@ router.get('/search', async (req: Request, res: Response, next: NextFunction) =>
       // q-only or q+cita path.
       const baseWhere: string[] = []
       if (chamberFilter) baseWhere.push('seduta_id.chamber = $chamber')
-      if (organo === ORGANO_ASSEMBLEA) {
+      if (commissione) {
+        baseWhere.push('seduta_id.organo_slug = $commissione')
+        bindings.commissione = commissione
+      } else if (organo === ORGANO_ASSEMBLEA) {
         // Same reasoning as the Meili filter: rows written before the organo
         // backfill are all plenary. The backfill makes this branch redundant,
         // but it costs nothing and removes an ordering dependency between the
@@ -1119,7 +1174,9 @@ router.get('/search', async (req: Request, res: Response, next: NextFunction) =>
         try {
           const filter: string[] = []
           if (chamberFilter) filter.push(`chamber = ${JSON.stringify(chamberFilter)}`)
-          if (organo === ORGANO_ASSEMBLEA) {
+          if (commissione) {
+            filter.push(`organo_slug = ${JSON.stringify(commissione)}`)
+          } else if (organo === ORGANO_ASSEMBLEA) {
             // Documents indexed before committee support existed carry no
             // `organo` field at all, and Meilisearch treats a missing field as
             // non-matching -- so an exact `organo = "assemblea"` filter scores
