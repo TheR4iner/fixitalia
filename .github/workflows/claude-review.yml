@@ -55,7 +55,7 @@ jobs:
     steps:
       # Needed up front for the local composite action below, not only for
       # Claude's own working directory.
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
         with:
           fetch-depth: 1
 
