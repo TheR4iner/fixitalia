@@ -104,14 +104,56 @@ jobs:
           PR_URL: ${{ github.event.pull_request.html_url }}
         run: gh pr edit "$PR_URL" --add-label 'needs-review' || true
 
-      # Waits for every check on the head commit. Exits non-zero the moment one
-      # fails, which leaves the pull request open and unmerged.
-      - name: Wait for CI
+      # Waits for the checks that branch protection actually requires, then
+      # merges. Exits non-zero the moment a required check fails, which leaves
+      # the pull request open and unmerged.
+      #
+      # `--required` is load-bearing, not a refinement. Without it, `gh pr
+      # checks --watch` waits for EVERY check on the pull request, and this
+      # job is itself one of them, so it waits on itself until the job
+      # timeout. That is not hypothetical: it is what happened to #18, which
+      # sat with every real check green and `Auto-merge` pending until it was
+      # cancelled by hand. Requiring at least one branch protection check is
+      # therefore a prerequisite for this workflow, since `--required` has
+      # nothing to wait for otherwise.
+      #
+      # The tidier alternative is `gh pr merge --auto`, which hands the wait
+      # to GitHub and costs no runner minutes, but it needs "Allow auto-merge"
+      # enabled in the repository settings. Switch to it if that gets turned
+      # on.
+      - name: Wait for required checks
         if: steps.decide.outputs.merge == 'true'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           PR_URL: ${{ github.event.pull_request.html_url }}
-        run: gh pr checks "$PR_URL" --watch --fail-fast --interval 30
+        run: |
+          set -euo pipefail
+
+          # Wait for the required checks to EXIST, which is a different
+          # question from whether they have passed. Without `--json`,
+          # `gh pr checks` exits non-zero for a check that is merely still
+          # running, so looping on its exit status would block until CI had
+          # actually finished and then hard-fail on a slow-but-healthy run,
+          # reporting "no checks appeared" about a check that had appeared
+          # and was simply in progress. With `--json` it exits 0 and returns
+          # the array whatever the state, which is the distinction needed
+          # here. Verified against a passing and a failing pull request.
+          for attempt in $(seq 1 10); do
+            found="$(gh pr checks "$PR_URL" --required --json name 2>/dev/null || echo '[]')"
+            if [[ "$(jq 'length' <<< "$found" 2>/dev/null || echo 0)" -gt 0 ]]; then
+              break
+            fi
+            if (( attempt == 10 )); then
+              echo "::error::No required check has been created on $PR_URL after five minutes. Branch protection must require at least one check for this workflow to gate on."
+              exit 1
+            fi
+            echo "No required check registered yet; retrying in 30s (attempt $attempt/10)."
+            sleep 30
+          done
+
+          # Now do the actual waiting, which has no timeout of its own beyond
+          # the job's.
+          gh pr checks "$PR_URL" --watch --fail-fast --required --interval 30
 
       - name: Merge
         if: steps.decide.outputs.merge == 'true'
