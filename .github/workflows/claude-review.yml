@@ -49,7 +49,12 @@ jobs:
       github.event.pull_request.user.login != 'dependabot[bot]' &&
       github.event.pull_request.draft == false
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    # Kept comfortably above what 40 turns costs, so the turn cap is the
+    # thing that stops a runaway review rather than the wall clock. A job
+    # timeout is a raw cancellation: it kills the `if: always()` reporting
+    # step too, so the run ends with no explanation, which is the opposite of
+    # what the turn cap is for. Measured: 25 turns took 2m39s.
+    timeout-minutes: 30
     permissions:
       contents: read
       pull-requests: write
