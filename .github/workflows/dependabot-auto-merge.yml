@@ -1,0 +1,81 @@
+name: Dependabot auto-merge
+
+# Merges Dependabot's low-risk pull requests once CI is green, and leaves the
+# rest for a human.
+#
+# Why `pull_request_target` and not `pull_request`: a workflow run triggered by
+# Dependabot on the `pull_request` event gets a READ-ONLY `GITHUB_TOKEN` and no
+# repository secrets, so it cannot merge anything. `pull_request_target` runs in
+# the base repository's context with a writable token.
+#
+# That trigger is dangerous when it checks out and executes the pull request's
+# code, because the code is contributor-controlled and the token is not. This
+# workflow never checks out anything. It reads metadata from the Dependabot API
+# and calls `gh`. Keep it that way: do not add `actions/checkout` here.
+
+on:
+  pull_request_target:
+    types: [opened, synchronize, reopened]
+
+permissions:
+  contents: write
+  pull-requests: write
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  auto-merge:
+    name: Auto-merge
+    if: github.actor == 'dependabot[bot]'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Read Dependabot metadata
+        id: meta
+        uses: dependabot/fetch-metadata@v2
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+
+      # For a grouped pull request, `update-type` is the largest bump in the
+      # group, so a group containing one major is treated as a major.
+      - name: Decide
+        id: decide
+        env:
+          UPDATE_TYPE: ${{ steps.meta.outputs.update-type }}
+          DEPENDENCY_NAMES: ${{ steps.meta.outputs.dependency-names }}
+        run: |
+          case "$UPDATE_TYPE" in
+            version-update:semver-patch|version-update:semver-minor)
+              echo "merge=true" >> "$GITHUB_OUTPUT"
+              echo "Patch or minor bump of: $DEPENDENCY_NAMES -- eligible."
+              ;;
+            *)
+              echo "merge=false" >> "$GITHUB_OUTPUT"
+              echo "$UPDATE_TYPE of: $DEPENDENCY_NAMES -- leaving for review."
+              ;;
+          esac
+
+      - name: Label majors for review
+        if: steps.decide.outputs.merge == 'false'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR_URL: ${{ github.event.pull_request.html_url }}
+        run: gh pr edit "$PR_URL" --add-label 'needs-review' || true
+
+      # Waits for every check on the head commit. Exits non-zero the moment one
+      # fails, which leaves the pull request open and unmerged.
+      - name: Wait for CI
+        if: steps.decide.outputs.merge == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR_URL: ${{ github.event.pull_request.html_url }}
+        run: gh pr checks "$PR_URL" --watch --fail-fast --interval 30
+
+      - name: Merge
+        if: steps.decide.outputs.merge == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR_URL: ${{ github.event.pull_request.html_url }}
+        run: gh pr merge "$PR_URL" --squash --delete-branch

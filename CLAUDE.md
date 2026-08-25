@@ -13,7 +13,7 @@ Consult `project-kb/` for topic-specific notes on bugs, features, and architectu
 - **Frontend**: Vite 7 + React 19 + TypeScript (strict), React Router 7, Tailwind v4 + shadcn/ui (`radix-nova` style). Source under `src/`.
 - **Backend**: Express 5 + TypeScript (via `tsx`). Source under `server/`. Exposes `/api/*`.
 - **Data**: SurrealDB v2.1.4 sidecar (rocksdb storage, bind-mounted at `./server/data/surreal`). Reachable inside the compose network as `fixitalia-surrealdb:8000`.
-- **CI**: GitHub Actions, via thin caller stubs that reference reusable workflows at `TheR4iner/reusable-workflows@v1`. `ci.yml` runs CI (lint/type/test/build) on push/PR to `main` and `develop` but does **not** publish. `release.yml` publishes the `ghcr.io/TheR4iner/fixitalia-{frontend,backend}` images and deploys to the VPS on `v*` tags -- the only path that publishes or deploys.
+- **CI**: GitHub Actions, vendored into `.github/workflows/` (the shared `TheR4iner/reusable-workflows` repo is private, and a public caller cannot resolve it). `ci.yml` runs CI (lint/type/test/build) on push/PR to `main` and `develop` but does **not** publish. `release.yml` publishes the `ghcr.io/TheR4iner/fixitalia-{frontend,backend}` images and deploys to the VPS on `v*` tags -- the only path that publishes or deploys.
 - **Testing**: Vitest + Testing Library (frontend and backend). Happy DOM as the test environment.
 
 ## Development environment
@@ -96,7 +96,7 @@ with `appalti` or `opere-incompiute` for a working site.
 │   ├── scripts/                 # Ingest CLI and one-off probes
 │   ├── data/                    # Persisted files -- gitignored
 │   └── test/                    # Backend tests
-├── .github/workflows/           # Thin caller stubs for shared reusable workflows
+├── .github/workflows/           # CI, release, security, Claude review, Dependabot auto-merge
 └── project-kb/                  # Long-lived notes per topic (see below)
 ```
 
@@ -198,15 +198,34 @@ this repo with real legal exposure.
 
 ## CI / CD
 
-All workflows are thin caller stubs that reference reusable workflows in the private repo `TheR4iner/reusable-workflows@v1`. The actual CI logic lives there; updating it once benefits every project.
+The workflows used to be thin caller stubs pointing at the private repo
+`TheR4iner/reusable-workflows@v1`. They are now **vendored into this
+repository**: the shared repo is private, so a public caller could not resolve
+it and every run failed before starting a job. Inlining also means a fork's CI
+works without access to anything outside this repository. Edit the workflow
+files here directly; there is no upstream to pick changes up from.
 
-- **On push/PR** to `main` or `develop`: `ci.yml` calls `web-ci.yml` (frontend + backend lint, type-check, test, build). Both must pass. `ci.yml` does **not** publish images -- pushing to `main` builds and verifies only.
-- **On `v*` tag push**: `release.yml` calls `web-docker-publish.yml` and publishes the images to `ghcr.io/TheR4iner/fixitalia-{frontend,backend}` -- semver tags (`{major}`, `{major}.{minor}`, `{version}`), a short-SHA tag, and `latest` -- then runs the `deploy` job (syncs SurrealDB credentials to the VPS, then SSHes in to pull + restart). Tagging is the only path that publishes images or deploys. Create release tags with `git tag v1.2.3 && git push --tags`.
-- **Weekly (Mondays 09:00 UTC) and on push/PR**: `security.yml` calls `web-security.yml` (`npm audit` + license check).
+- **On push/PR** to `main` or `develop`: `ci.yml` runs the frontend job (lint, `tsc --noEmit`, tests, build) and the backend job (type-check, tests), then a `ci-success` gate that fails if either did. `ci.yml` does **not** publish images -- pushing to `main` builds and verifies only.
+- **On `v*` tag push**: `release.yml` publishes the images to `ghcr.io/TheR4iner/fixitalia-{frontend,backend}` -- semver tags (`{major}`, `{major}.{minor}`, `{version}`), a short-SHA tag, and `latest` -- then runs the `deploy` job (syncs the SurrealDB login to the VPS, then SSHes in to pull + restart). Tagging is the only path that publishes images or deploys. Create release tags with `git tag v1.2.3 && git push --tags`.
+- **Weekly (Mondays 09:00 UTC) and on push/PR**: `security.yml` runs `npm audit` and a licence check. Both jobs end in `|| true`, so a green check here means the scan ran, not that it found nothing.
+- **On PR**: `claude-review.yml` runs an automated review. It is skipped for forks and for Dependabot, because GitHub withholds secrets from both, and it is skipped entirely when `ANTHROPIC_API_KEY` is unset rather than failing the check.
 
-**One-time setup**: the `reusable-workflows` repo is private. For this caller to access it, the shared repo's *Settings -> Actions -> General -> Access* must be set to *"Accessible from repositories owned by the user TheR4iner"*. This is a per-shared-repo setting, configured once and benefits all callers.
+### Dependency updates
 
-To pick up CI improvements pushed to `reusable-workflows`, no action is needed; `@v1` floats and auto-updates on non-breaking releases. To pin to an exact version, change `@v1` to `@v1.2.3` in the caller files.
+`.github/dependabot.yml` configures grouped weekly version updates for both npm
+workspaces plus monthly `github-actions` updates. The config file matters for
+coverage, not just noise: without one, Dependabot runs in security-only mode,
+which is alert-driven and best-effort per manifest. In August 2026 it opened
+six pull requests for `server/package-lock.json` and never dispatched a single
+job for the root one, leaving ten frontend advisories unattempted with nothing
+to signal it. Scheduled version updates are driven by a cron over every
+directory in the config instead.
+
+`dependabot-auto-merge.yml` squash-merges Dependabot's patch and minor pull
+requests once every check on the head commit passes, and labels anything
+carrying a major bump `needs-review` instead. It runs on `pull_request_target`
+because Dependabot-triggered `pull_request` runs get a read-only token; it
+therefore never checks out the pull request's code, and must stay that way.
 
 To trigger a release:
 

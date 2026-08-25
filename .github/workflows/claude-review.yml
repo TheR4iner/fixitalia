@@ -27,19 +27,42 @@ concurrency:
 jobs:
   review:
     name: Review
-    # Same-repository branches only; see the note above.
-    if: github.event.pull_request.head.repo.full_name == github.repository
+    # Same-repository branches only; see the note above. Dependabot is
+    # excluded for the same reason forks are: GitHub withholds secrets from
+    # runs it triggers, so the job could only ever fail. Its pull requests are
+    # handled by dependabot-auto-merge.yml instead.
+    if: >-
+      github.event.pull_request.head.repo.full_name == github.repository &&
+      github.actor != 'dependabot[bot]'
     runs-on: ubuntu-latest
     permissions:
       contents: read
       pull-requests: write
       id-token: write
     steps:
+      # The `secrets` context cannot be used in a job-level `if`, so the
+      # presence of the key is checked here instead. Without this the job
+      # fails on every pull request whenever the secret is unset, which reads
+      # as a broken build rather than as missing configuration.
+      - name: Check for an API key
+        id: preflight
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+        run: |
+          if [[ -n "$ANTHROPIC_API_KEY" ]]; then
+            echo 'configured=true' >> "$GITHUB_OUTPUT"
+          else
+            echo 'configured=false' >> "$GITHUB_OUTPUT"
+            echo '::notice::ANTHROPIC_API_KEY is not set; skipping the review.'
+          fi
+
       - uses: actions/checkout@v5
+        if: steps.preflight.outputs.configured == 'true'
         with:
           fetch-depth: 1
 
       - uses: anthropics/claude-code-action@v1
+        if: steps.preflight.outputs.configured == 'true'
         with:
           anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
           prompt: |
