@@ -110,43 +110,75 @@ function parseItalianDate(raw: string): Date | null {
 }
 
 /**
- * Organi the LOD graph does not know about, discovered by probing.
+ * Committees the *sittings* graph does not know about.
  *
- * dati.senato.it models osr:SedutaCommissione for the Commissioni permanenti,
- * their sottocommissioni and the bicamerali -- 33 organi in legislature 18 --
- * but carries NO sittings for the Giunte, even though senato.it publishes
- * their resoconti sommari perfectly normally (the Giunta delle elezioni alone
- * has 205 in legislature 18). Enumerating from SPARQL alone therefore misses
- * them silently, which is the worst kind of gap: the ingest reports success
- * and the corpus is simply short.
+ * dati.senato.it models osr:SedutaCommissione for the standing committees and
+ * their sottocommissioni, but for a whole class of organi it reports ZERO
+ * sittings even though senato.it publishes their resoconti normally. Two
+ * groups are affected and both matter:
  *
- * Rather than hardcode the organi we happen to know about, probe the code
- * space the site itself uses. A committee's landing listing is one request and
- * either renders or serves the "Pagina non disponibile" shell, so a code that
- * does not exist costs exactly one request and is skipped. That means a new
- * or renamed organo is picked up without a code change -- which matters,
- * because the failure mode of a hardcoded list is invisible missing data.
+ *   - the Giunte;
+ *   - inquiry commissions established mid-legislature, which are precisely the
+ *     newsworthy ones. The Covid inquiry (4-226) has 59 published sommari and
+ *     not a single osr:SedutaCommissione row.
  *
- * The ranges are bounded by what the site's own code space uses: tipo 0 is
- * permanent committees and giunte, tipo 4 is bicamerali. Probing is skipped
- * entirely for codes SPARQL already knows about.
+ * Enumerating from the sittings graph alone therefore misses them silently,
+ * which is the worst kind of gap: the ingest reports success and the corpus is
+ * simply short.
+ *
+ * The fix is data-driven rather than a guessed numeric range. osr:Commissione
+ * carries a denominazione with an `inizio` date, so the candidates for a
+ * legislature are the committees that came into existence during it. That
+ * yields ~13 candidates for legislature 19 instead of a blind sweep, and it
+ * cannot go stale: a commission created next year appears without a code
+ * change.
+ *
+ * An earlier version probed tipo 0 and 4 over cod 1-32. That range was simply
+ * wrong -- the leg-19 roster itself contains 0-145 through 0-151 and 4-40, and
+ * the Covid commission sits at 4-226 -- and it is the reason this gap existed.
  */
-const PROBE_TIPI = ['0', '4'] as const
-const PROBE_COD_MAX = 32
-
-/** Names for probed organi, when we can do better than the bare code. */
-const KNOWN_ORGANO_NAMES: Record<string, string> = {
-  '0-20': 'Giunta per il Regolamento',
-  '0-21': "Giunta delle elezioni e delle immunita' parlamentari",
-  '0-22': 'Giunta per gli affari delle Comunita europee',
+interface OrganoCandidate {
+  cod: string
+  nome: string | null
+  inizio: string
 }
 
 /**
- * Probe for organi missing from the LOD roster.
- *
- * Uses the `A` (most-recent-year) listing, which is one request per candidate
- * and tells us both whether the organo exists in this legislature and what the
- * site calls it.
+ * Every committee the LOD knows about, with the date it came into existence.
+ * Not legislature-scoped -- the caller filters by the window it cares about.
+ */
+async function fetchCommissioniWithStartDates(): Promise<OrganoCandidate[]> {
+  const res = await querySparql(
+    `PREFIX osr: <http://dati.senato.it/osr/>
+     SELECT ?c ?t (MIN(?i) AS ?inizio) WHERE {
+       ?c a osr:Commissione ; osr:denominazione ?d .
+       ?d osr:inizio ?i .
+       OPTIONAL { ?d osr:titoloBreve ?t }
+     } GROUP BY ?c ?t`,
+    90_000,
+  )
+  const best = new Map<string, OrganoCandidate>()
+  for (const row of res.results.bindings) {
+    const uri = sparqlValue(row, 'c')
+    const inizio = sparqlValue(row, 'inizio')
+    if (!uri || !inizio) continue
+    const cod = uri.split('/').pop() ?? ''
+    if (!cod.includes('-')) continue
+    const prev = best.get(cod)
+    // Keep the earliest start: a committee can be renamed, and each
+    // denominazione carries its own inizio.
+    if (!prev || inizio < prev.inizio) {
+      best.set(cod, { cod, nome: sparqlValue(row, 't'), inizio })
+    }
+  }
+  return [...best.values()]
+}
+
+/**
+ * Confirm a candidate actually publishes in this legislature and learn what
+ * the site calls it. One request per candidate; a committee that did not sit
+ * in this legislature renders the "Pagina non disponibile" shell and is
+ * dropped.
  */
 async function discoverMissingOrgani(
   context: BrowserContext,
@@ -154,42 +186,62 @@ async function discoverMissingOrgani(
   known: Set<string>,
   years: number[],
 ): Promise<SenatoCommissione[]> {
+  if (years.length === 0) return []
+  const from = `${years[0]}-01-01`
+  const to = `${years[years.length - 1]}-12-31`
+
+  let candidates: OrganoCandidate[]
+  try {
+    candidates = (await fetchCommissioniWithStartDates()).filter(
+      (c) => !known.has(c.cod) && c.inizio >= from && c.inizio <= to,
+    )
+  } catch (err) {
+    console.warn(
+      '[ingest:parlamento:senato-commissioni-index] could not fetch committee start dates; ' +
+        'the roster will cover only committees with sittings in the LOD:',
+      err instanceof Error ? err.message : err,
+    )
+    return []
+  }
+
+  console.log(
+    `[ingest:parlamento:senato-commissioni-index] leg=${legislatura} ${candidates.length} committees ` +
+      `created during this legislature are absent from the sittings graph -- probing them`,
+  )
+
   const found: SenatoCommissione[] = []
-  for (const tipo of PROBE_TIPI) {
-    for (let cod = 1; cod <= PROBE_COD_MAX; cod += 1) {
-      const key = `${tipo}-${cod}`
-      if (known.has(key)) continue
-      const url = `https://www.senato.it/static/bgt/listasommcomm/${tipo}/${cod}/A/${legislatura}/index.html`
+  for (const cand of candidates) {
+    const dash = cand.cod.indexOf('-')
+    const tipo = cand.cod.slice(0, dash)
+    const codNum = cand.cod.slice(dash + 1)
+    const url = `https://www.senato.it/static/bgt/listasommcomm/${tipo}/${codNum}/A/${legislatura}/index.html`
+    try {
+      const page = await navigateWithWaf(context, url)
       try {
-        const page = await navigateWithWaf(context, url)
-        try {
-          const html = await page.content()
-          if (/Pagina non disponibile/i.test(html)) continue
-          const { nome, entries } = parseSenatoCommissioniListing(legislatura, html)
-          // A landing page that renders but lists nothing is an organo with no
-          // published sommari in this legislature -- not worth queueing years for.
-          if (entries.length === 0 && !nome) continue
-          found.push({
-            cod: key,
-            tipo,
-            codNum: String(cod),
-            nome: nome ?? KNOWN_ORGANO_NAMES[key] ?? null,
-            categoria: null,
-            years,
-          })
-          console.log(
-            `[ingest:parlamento:senato-commissioni-index] discovered organo ${key} ` +
-              `absent from the LOD roster: ${nome ?? '(unnamed)'}`,
-          )
-        } finally {
-          await page.close().catch(() => {})
-        }
-      } catch (err) {
-        console.warn(
-          `[ingest:parlamento:senato-commissioni-index] probe ${key} failed (continuing):`,
-          err instanceof Error ? err.message : err,
+        const html = await page.content()
+        if (/Pagina non disponibile/i.test(html)) continue
+        const { nome, entries } = parseSenatoCommissioniListing(legislatura, html)
+        if (entries.length === 0 && !nome) continue
+        found.push({
+          cod: cand.cod,
+          tipo,
+          codNum,
+          nome: nome ?? cand.nome,
+          categoria: null,
+          years,
+        })
+        console.log(
+          `[ingest:parlamento:senato-commissioni-index] recovered ${cand.cod} ` +
+            `(absent from the sittings graph): ${nome ?? cand.nome ?? '(unnamed)'}`,
         )
+      } finally {
+        await page.close().catch(() => {})
       }
+    } catch (err) {
+      console.warn(
+        `[ingest:parlamento:senato-commissioni-index] probe ${cand.cod} failed (continuing):`,
+        err instanceof Error ? err.message : err,
+      )
     }
   }
   return found
@@ -334,6 +386,47 @@ async function scrapeYear(
   }
 }
 
+type SedutaUpsert = { id: RecordId<'parlamento_sedute'>; doc: Record<string, unknown> }
+
+/**
+ * Write a batch of discovered sittings.
+ *
+ * UPSERT ... MERGE, never CONTENT: CONTENT replaces the whole record and would
+ * wipe body_status, silently re-queueing every already-ingested sitting for a
+ * full re-fetch.
+ *
+ * Returns how many rows landed. Failures degrade to per-row so one bad row
+ * cannot cost the batch.
+ */
+async function upsertSedute(docs: SedutaUpsert[], label: string): Promise<number> {
+  let inserted = 0
+  const BATCH = 200
+  for (let i = 0; i < docs.length; i += BATCH) {
+    const slice = docs.slice(i, i + BATCH)
+    try {
+      await runQuery(`FOR $r IN $rows { UPSERT $r.id MERGE $r.doc; };`, { rows: slice })
+      inserted += slice.length
+    } catch (err) {
+      console.warn(
+        `[ingest:parlamento:senato-commissioni-index] ${label} batch failed; per-row fallback:`,
+        err instanceof Error ? err.message : err,
+      )
+      for (const r of slice) {
+        try {
+          await runQuery(`UPSERT $id MERGE $doc;`, { id: r.id, doc: r.doc })
+          inserted += 1
+        } catch (rowErr) {
+          console.warn(
+            `[ingest:parlamento:senato-commissioni-index] upsert failed for ${String(r.id)}:`,
+            rowErr instanceof Error ? rowErr.message : rowErr,
+          )
+        }
+      }
+    }
+  }
+  return inserted
+}
+
 export async function ingestSenatoCommissioniIndex(
   legislatura: number,
   context: BrowserContext,
@@ -369,7 +462,7 @@ export async function ingestSenatoCommissioniIndex(
         cod,
         tipo: cod.slice(0, dash),
         codNum: cod.slice(dash + 1),
-        nome: KNOWN_ORGANO_NAMES[cod] ?? null,
+        nome: null,
         categoria: null,
         years: rosterYears(await fetchSenatoCommissioniRoster(legislatura)),
       })
@@ -380,10 +473,20 @@ export async function ingestSenatoCommissioniIndex(
       `${roster.reduce((a, c) => a + c.years.length, 0)} committee-years to scan`,
   )
 
+  // Written per committee rather than once at the end.
+  //
+  // This pass is WAF-throttled and takes ~37 minutes for a legislature (173
+  // listing pages for leg 19). Buffering every row until the end meant an
+  // interrupted run -- Ctrl-C, a dropped connection, a WAF block on page 170 --
+  // discarded all of it, and nothing was visible in the meantime, which reads
+  // as "the ingest did nothing". Committing per committee makes progress
+  // durable and observable, at the cost of a few more round trips.
   let pagesScanned = 0
-  const docs: Array<{ id: RecordId<'parlamento_sedute'>; doc: Record<string, unknown> }> = []
+  let inserted = 0
+  let seen = 0
 
   for (const c of roster) {
+    const docs: SedutaUpsert[] = []
     for (const year of c.years) {
       try {
         const { nome, entries } = await scrapeYear(context, legislatura, c, year)
@@ -430,33 +533,14 @@ export async function ingestSenatoCommissioniIndex(
         )
       }
     }
-  }
 
-  // UPSERT ... MERGE, never CONTENT: CONTENT would replace the whole record
-  // and wipe body_status, silently re-queueing every already-ingested sitting.
-  let inserted = 0
-  const BATCH = 200
-  for (let i = 0; i < docs.length; i += BATCH) {
-    const slice = docs.slice(i, i + BATCH)
-    try {
-      await runQuery(`FOR $r IN $rows { UPSERT $r.id MERGE $r.doc; };`, { rows: slice })
-      inserted += slice.length
-    } catch (err) {
-      console.warn(
-        `[ingest:parlamento:senato-commissioni-index] batch ${i / BATCH + 1} failed; per-row fallback:`,
-        err instanceof Error ? err.message : err,
+    if (docs.length > 0) {
+      seen += docs.length
+      inserted += await upsertSedute(docs, c.cod)
+      console.log(
+        `[ingest:parlamento:senato-commissioni-index] ${c.cod} committed ${docs.length} sittings ` +
+          `(${inserted} so far)`,
       )
-      for (const r of slice) {
-        try {
-          await runQuery(`UPSERT $id MERGE $doc;`, { id: r.id, doc: r.doc })
-          inserted += 1
-        } catch (rowErr) {
-          console.warn(
-            `[ingest:parlamento:senato-commissioni-index] upsert failed for ${String(r.id)}:`,
-            rowErr instanceof Error ? rowErr.message : rowErr,
-          )
-        }
-      }
     }
   }
 
@@ -483,7 +567,7 @@ export async function ingestSenatoCommissioniIndex(
 
   const durationMs = Date.now() - started
   console.log(
-    `[ingest:parlamento:senato-commissioni-index] leg=${legislatura} upserted ${inserted}/${docs.length} sittings ` +
+    `[ingest:parlamento:senato-commissioni-index] leg=${legislatura} upserted ${inserted}/${seen} sittings ` +
       `from ${pagesScanned} listing pages in ${durationMs} ms`,
   )
 
@@ -492,7 +576,7 @@ export async function ingestSenatoCommissioniIndex(
     legislatura,
     commissioni: roster.length,
     pagesScanned,
-    rowsSeen: docs.length,
+    rowsSeen: seen,
     rowsInserted: inserted,
     durationMs,
   }

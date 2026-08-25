@@ -8,12 +8,14 @@ import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { Input } from '@/components/ui/input'
 import { Skeleton } from '@/components/ui/skeleton'
 import { useQuery } from '@/hooks/useQuery'
-import { fetchCommissioni, type Commissione } from '@/services/parlamento'
 import {
-  LEGISLATURE_WITH_DATA,
-  parseChamberParam,
-  parseLegParam,
-} from '@/lib/parlamento-params'
+  fetchCommissioni,
+  ricercaUrl,
+  type Commissione,
+  type CommissioniSort,
+  type TipoResoconto,
+} from '@/services/parlamento'
+import { parseChamberParam, parseLegParam } from '@/lib/parlamento-params'
 import { formatDate } from '@/lib/format'
 import { t } from '@/i18n/it'
 
@@ -41,19 +43,43 @@ export default function CommissioniPage() {
   const [searchParams, setSearchParams] = useSearchParams()
   const chamber = parseChamberParam(searchParams.get('chamber'))
   const leg = parseLegParam(searchParams.get('leg'))
+  const year = searchParams.get('year')
+  const tipo = searchParams.get('tipo') as TipoResoconto | null
+  const conTesto = searchParams.get('conTesto') === 'true'
+  const sort = (searchParams.get('sort') ?? 'sedute') as CommissioniSort
   const [filter, setFilter] = useState('')
+  const hasFilters =
+    Boolean(chamber || year || tipo || conTesto) || leg != null || sort !== 'sedute'
 
   const query = useQuery(
-    ['parlamento/commissioni', chamber, leg] as const,
-    () => fetchCommissioni({ chamber, leg }),
+    ['parlamento/commissioni', chamber, leg, year, tipo, conTesto, sort] as const,
+    () =>
+      fetchCommissioni({
+        chamber,
+        leg,
+        year: year ? Number(year) : undefined,
+        tipo: tipo ?? undefined,
+        conTesto,
+        sort,
+      }),
     { ttlMs: 5 * 60 * 1000 },
   )
 
   const rows = useMemo(() => query.data?.data ?? [], [query.data])
+  const facets = query.data?.facets ?? { anni: [], legislature: [] }
   const shown = useMemo(() => {
-    const n = norm(filter.trim())
-    if (n.length === 0) return rows
-    return rows.filter((c) => norm(`${c.organo_nome ?? ''} ${c.organo_cod ?? ''}`).includes(n))
+    // Match every typed word independently rather than the phrase as one
+    // substring. Committee names are long and formal, so the words a person
+    // remembers are rarely adjacent in them: "inchiesta emergenza" appears in
+    // "Commissione parlamentare di inchiesta sulla gestione dell'emergenza
+    // sanitaria", but not next to each other, and a substring match returns
+    // nothing.
+    const terms = norm(filter.trim()).split(/\s+/).filter(Boolean)
+    if (terms.length === 0) return rows
+    return rows.filter((c) => {
+      const hay = norm(`${c.organo_nome ?? ''} ${c.organo_cod ?? ''}`)
+      return terms.every((term) => hay.includes(term))
+    })
   }, [rows, filter])
 
   function setParam(key: string, value: string | undefined) {
@@ -133,12 +159,71 @@ export default function CommissioniPage() {
             className="h-9 rounded-md border border-border bg-background px-2 text-sm text-foreground"
           >
             <option value="">{t.parlamento.commissioni.legAll}</option>
-            {LEGISLATURE_WITH_DATA.map((n) => (
+            {facets.legislature.map((n) => (
               <option key={n} value={n}>
                 {t.parlamento.commissioni.legLabel(n)}
               </option>
             ))}
           </select>
+
+          <select
+            value={year ?? ''}
+            onChange={(e) => setParam('year', e.target.value || undefined)}
+            aria-label={t.parlamento.commissioni.yearAll}
+            className="h-9 rounded-md border border-border bg-background px-2 text-sm text-foreground"
+          >
+            <option value="">{t.parlamento.commissioni.yearAll}</option>
+            {facets.anni.map((a) => (
+              <option key={a} value={a}>{a}</option>
+            ))}
+          </select>
+
+          <select
+            value={tipo ?? ''}
+            onChange={(e) => setParam('tipo', e.target.value || undefined)}
+            aria-label={t.parlamento.commissioni.typeAll}
+            className="h-9 rounded-md border border-border bg-background px-2 text-sm text-foreground"
+          >
+            <option value="">{t.parlamento.commissioni.typeAll}</option>
+            <option value="stenografico">{t.parlamento.commissioni.typeSteno}</option>
+            <option value="sommario">{t.parlamento.commissioni.typeSommario}</option>
+          </select>
+
+          <select
+            value={sort}
+            onChange={(e) => setParam('sort', e.target.value === 'sedute' ? undefined : e.target.value)}
+            aria-label={t.parlamento.commissioni.sortBy}
+            className="h-9 rounded-md border border-border bg-background px-2 text-sm text-foreground"
+          >
+            <option value="sedute">{t.parlamento.commissioni.sortSedute}</option>
+            <option value="recenti">{t.parlamento.commissioni.sortRecenti}</option>
+            <option value="interventi">{t.parlamento.commissioni.sortInterventi}</option>
+            <option value="nome">{t.parlamento.commissioni.sortNome}</option>
+          </select>
+
+          <button
+            type="button"
+            onClick={() => setParam('conTesto', conTesto ? undefined : 'true')}
+            aria-pressed={conTesto}
+            className={
+              'rounded-md border px-3 py-1.5 text-sm transition-colors ' +
+              (conTesto
+                ? 'border-foreground bg-foreground text-background'
+                : 'border-border text-muted-foreground hover:bg-muted hover:text-foreground')
+            }
+          >
+            {t.parlamento.commissioni.onlyWithTextRoster}
+          </button>
+
+          {hasFilters ? (
+            <button
+              type="button"
+              onClick={() => setSearchParams(new URLSearchParams(), { replace: true })}
+              className="text-sm text-muted-foreground underline underline-offset-4 hover:text-foreground"
+            >
+              {t.parlamento.commissioni.resetFilters}
+            </button>
+          ) : null}
 
           <span className="ml-auto text-sm text-muted-foreground">
             {t.parlamento.commissioni.showing(shown.length, rows.length)}
@@ -159,10 +244,26 @@ export default function CommissioniPage() {
           </CardHeader>
         </Card>
       ) : shown.length === 0 ? (
+        // A committee's OFFICIAL name often omits the word people search by:
+        // the Covid inquiry is formally "...emergenza sanitaria epidemiologica
+        // da SARS-CoV-2", which no amount of name matching will find from
+        // "covid". Rather than maintain a synonym list that will always be
+        // incomplete, point at the search that does work -- the transcripts
+        // themselves say Covid constantly.
         <Card>
           <CardHeader>
-            <CardTitle>{t.parlamento.commissioni.filterNoMatch}</CardTitle>
+            <CardTitle className="text-base">
+              {t.parlamento.commissioni.filterNoMatch}
+            </CardTitle>
           </CardHeader>
+          <CardContent className="text-sm text-muted-foreground">
+            <Link
+              to={ricercaUrl(filter.trim(), { organo: 'commissione' })}
+              className="underline underline-offset-4 hover:text-foreground"
+            >
+              {t.parlamento.commissioni.tryFullText(filter.trim())}
+            </Link>
+          </CardContent>
         </Card>
       ) : (
         <ul className="grid gap-4 sm:grid-cols-2">

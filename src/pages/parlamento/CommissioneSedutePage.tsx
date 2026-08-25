@@ -16,7 +16,7 @@ import {
   ricercaUrl,
   type Seduta,
 } from '@/services/parlamento'
-import { parsePositiveInt } from '@/lib/parlamento-params'
+import { parseLegParam, parsePositiveInt } from '@/lib/parlamento-params'
 import { formatDate } from '@/lib/format'
 import { t } from '@/i18n/it'
 
@@ -47,19 +47,43 @@ export default function CommissioneSedutePage() {
   const [searchParams, setSearchParams] = useSearchParams()
   const page = parsePositiveInt(searchParams.get('page'), 1)
   const titleQuery = searchParams.get('q') ?? ''
+  const year = searchParams.get('year')
+  const legFilter = parseLegParam(searchParams.get('leg'))
+  const tipologia = searchParams.get('tipologia') ?? ''
+  const conTesto = searchParams.get('conTesto') === 'true'
+  const sort: 'newest' | 'oldest' =
+    searchParams.get('sort') === 'oldest' ? 'oldest' : 'newest'
+  const hasFilters =
+    Boolean(titleQuery || year || tipologia || conTesto) ||
+    legFilter != null ||
+    sort !== 'newest'
 
   const [titleInput, setTitleInput] = useState(titleQuery)
   useEffect(() => setTitleInput(titleQuery), [titleQuery])
   const [fullText, setFullText] = useState('')
 
   const query = useQuery(
-    ['parlamento/commissione/sedute', slug, page, titleQuery] as const,
-    () => fetchCommissioneSedute(slug, { page, pageSize: PAGE_SIZE, q: titleQuery }),
+    [
+      'parlamento/commissione/sedute',
+      slug, page, titleQuery, year, legFilter, tipologia, conTesto, sort,
+    ] as const,
+    () =>
+      fetchCommissioneSedute(slug, {
+        page,
+        pageSize: PAGE_SIZE,
+        q: titleQuery,
+        year: year ? Number(year) : undefined,
+        leg: legFilter,
+        tipologia: tipologia || undefined,
+        conTesto,
+        sort,
+      }),
     { ttlMs: 5 * 60 * 1000 },
   )
 
   const rows = query.data?.data ?? []
   const total = query.data?.total ?? 0
+  const facets = query.data?.facets ?? { anni: [], legislature: [], tipologie: [] }
   const nome = rows[0]?.organo_nome ?? slug
   const isSommario = rows[0]?.tipo_resoconto === 'sommario'
 
@@ -125,6 +149,89 @@ export default function CommissioneSedutePage() {
           </Button>
         </form>
       </section>
+
+      {/* Facet filters. Options come from what this committee actually has, so
+          a year with no sittings is never offered. */}
+      <fieldset className="flex flex-wrap items-center gap-2">
+        <legend className="sr-only">{t.parlamento.commissioni.filtersLegend}</legend>
+
+        {facets.anni.length > 1 ? (
+          <select
+            value={year ?? ''}
+            onChange={(e) => setParam('year', e.target.value || undefined)}
+            aria-label={t.parlamento.commissioni.yearAll}
+            className="h-9 rounded-md border border-border bg-background px-2 text-sm"
+          >
+            <option value="">{t.parlamento.commissioni.yearAll}</option>
+            {facets.anni.map((a) => (
+              <option key={a} value={a}>{a}</option>
+            ))}
+          </select>
+        ) : null}
+
+        {facets.legislature.length > 1 ? (
+          <select
+            value={legFilter == null ? '' : String(legFilter)}
+            onChange={(e) => setParam('leg', e.target.value || undefined)}
+            aria-label={t.parlamento.commissioni.legFilterAll}
+            className="h-9 rounded-md border border-border bg-background px-2 text-sm"
+          >
+            <option value="">{t.parlamento.commissioni.legFilterAll}</option>
+            {facets.legislature.map((n) => (
+              <option key={n} value={n}>{t.parlamento.commissioni.legLabel(n)}</option>
+            ))}
+          </select>
+        ) : null}
+
+        {facets.tipologie.length > 1 ? (
+          <select
+            value={tipologia}
+            onChange={(e) => setParam('tipologia', e.target.value || undefined)}
+            aria-label={t.parlamento.commissioni.kindAll}
+            className="h-9 rounded-md border border-border bg-background px-2 text-sm"
+          >
+            <option value="">{t.parlamento.commissioni.kindAll}</option>
+            {facets.tipologie.map((k) => {
+              const map = t.parlamento.commissioni.tipologia as Record<string, string | undefined>
+              return <option key={k} value={k}>{map[k] ?? k}</option>
+            })}
+          </select>
+        ) : null}
+
+        <select
+          value={sort}
+          onChange={(e) => setParam('sort', e.target.value === 'oldest' ? 'oldest' : undefined)}
+          aria-label={t.parlamento.commissioni.sortNewest}
+          className="h-9 rounded-md border border-border bg-background px-2 text-sm"
+        >
+          <option value="newest">{t.parlamento.commissioni.sortNewest}</option>
+          <option value="oldest">{t.parlamento.commissioni.sortOldest}</option>
+        </select>
+
+        <button
+          type="button"
+          onClick={() => setParam('conTesto', conTesto ? undefined : 'true')}
+          aria-pressed={conTesto}
+          className={
+            'rounded-md border px-3 py-1.5 text-sm transition-colors ' +
+            (conTesto
+              ? 'border-foreground bg-foreground text-background'
+              : 'border-border text-muted-foreground hover:bg-muted hover:text-foreground')
+          }
+        >
+          {t.parlamento.commissioni.onlyWithText}
+        </button>
+
+        {hasFilters ? (
+          <button
+            type="button"
+            onClick={() => setSearchParams(new URLSearchParams())}
+            className="text-sm text-muted-foreground underline underline-offset-4 hover:text-foreground"
+          >
+            {t.parlamento.commissioni.resetFilters}
+          </button>
+        ) : null}
+      </fieldset>
 
       {/* Narrow THIS list by sitting title. */}
       <form onSubmit={onTitleSubmit} className="relative">

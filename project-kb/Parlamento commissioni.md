@@ -282,19 +282,35 @@ Marked clearly because several are upstream, not fixable here.
    different kinds of document and should not be built without accounting for
    it.
 
-4. **The Senato LOD graph omits the Giunte entirely** -- handled, but worth
-   knowing. `osr:SedutaCommissione` covers permanent committees,
-   sottocommissioni and bicamerali (33 organi in leg 18) and carries ZERO
-   sittings for the Giunte, even though senato.it publishes their sommari
-   normally (the Giunta delle elezioni alone has 205 in leg 18).
+4. **The Senato sittings graph omits whole classes of committee** -- handled,
+   but this is the most dangerous limit in the list because it fails silently.
 
-   The index pass closes this by probing the site's own code space
-   (`discoverMissingOrgani`): tipo 0 and 4, cod 1-32, skipping anything SPARQL
-   already knows. A code that does not exist costs one "Pagina non
-   disponibile" and is skipped, so the probe is ~64 requests per legislature,
-   once, at index time. This deliberately replaced a hardcoded list of three
-   Giunte: the failure mode of a hardcoded roster is silently missing data,
-   which is exactly what it was there to fix.
+   `osr:SedutaCommissione` covers the standing committees and their
+   sottocommissioni and reports **zero sittings** for two other groups:
+
+   - the **Giunte** (the Giunta delle elezioni alone has 205 in leg 18);
+   - **inquiry commissions created mid-legislature**, which are precisely the
+     newsworthy ones. The Covid inquiry (`4-226`) has **59 published sommari
+     and not a single row** in the sittings graph.
+
+   Enumerating from that graph alone therefore reports success while the
+   corpus is quietly short. Discovered when a search for the Covid commission
+   returned nothing.
+
+   The index pass closes it with `fetchCommissioniWithStartDates()`:
+   `osr:Commissione` carries a `denominazione` with an `inizio` date, so the
+   candidates for a legislature are the committees that came into existence
+   during it. Each is probed once against its listing; one that did not sit
+   renders the "not available" shell and is dropped. For leg 19 that is 13
+   candidates, of which **8 were real and entirely missing**: Covid,
+   Orlandi-Gregori, femminicidio, sistema bancario, fake news, COPASIR
+   provvisorio, insularità, PAM.
+
+   An earlier version probed tipo 0 and 4 over cod **1-32**. That range was
+   simply wrong and is what caused the gap: the leg-19 roster itself contains
+   `0-145` through `0-151` and `4-40`, and the Covid commission sits at
+   `4-226`. The lesson generalises -- a guessed numeric range is a hardcoded
+   roster wearing a disguise, and it fails the same way.
 
 5. **Senato backfill is slow by construction.** The WAF throttle means roughly
    8s per document. The full LOD-known corpus is ~74k sittings, i.e. weeks of

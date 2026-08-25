@@ -614,19 +614,46 @@ export interface Commissione {
   interventi: number | null
 }
 
+export type CommissioniSort = 'sedute' | 'recenti' | 'nome' | 'interventi'
+
 export interface CommissioniResponse {
   data: Commissione[]
   total: number
+  facets: { anni: number[]; legislature: number[] }
+}
+
+export interface CommissioniParams {
+  chamber?: Chamber
+  leg?: number
+  /** Committees that sat in this calendar year. */
+  year?: number
+  /** 'stenografico' | 'sommario'. */
+  tipo?: TipoResoconto
+  /** Only committees with at least one ingested transcript. */
+  conTesto?: boolean
+  sort?: CommissioniSort
 }
 
 export function fetchCommissioni(
-  params: { chamber?: Chamber; leg?: number } = {},
+  params: CommissioniParams = {},
 ): Promise<CommissioniResponse> {
   const qs = new URLSearchParams()
   if (params.chamber) qs.set('chamber', params.chamber)
   if (params.leg != null) qs.set('leg', String(params.leg))
+  if (params.year != null) qs.set('year', String(params.year))
+  if (params.tipo) qs.set('tipo', params.tipo)
+  if (params.conTesto) qs.set('conTesto', 'true')
+  if (params.sort) qs.set('sort', params.sort)
   const tail = qs.toString() ? `?${qs.toString()}` : ''
   return getJson<CommissioniResponse>(`${BASE}/commissioni${tail}`)
+}
+
+export interface CommissioneFacets {
+  /** Calendar years this committee sat, newest first. */
+  anni: number[]
+  legislature: number[]
+  /** Camera sitting kinds present for this committee (indag, audiz2, ...). */
+  tipologie: string[]
 }
 
 export interface CommissioneSeduteResponse {
@@ -635,18 +662,26 @@ export interface CommissioneSeduteResponse {
   pageSize: number
   total: number
   has_more: boolean
+  /** Values that actually exist for this committee, for populating filters. */
+  facets: CommissioneFacets
+}
+
+export interface CommissioneSeduteParams {
+  page?: number
+  pageSize?: number
+  leg?: number
+  sort?: SortOrder
+  /** Title filter; ignored below 2 characters. */
+  q?: string
+  year?: number
+  tipologia?: string
+  /** Only sittings whose transcript has been ingested. */
+  conTesto?: boolean
 }
 
 export function fetchCommissioneSedute(
   slug: string,
-  params: {
-    page?: number
-    pageSize?: number
-    leg?: number
-    sort?: SortOrder
-    /** Title filter within this committee; ignored below 2 characters. */
-    q?: string
-  } = {},
+  params: CommissioneSeduteParams = {},
 ): Promise<CommissioneSeduteResponse> {
   const qs = new URLSearchParams()
   if (params.page != null) qs.set('page', String(params.page))
@@ -654,6 +689,9 @@ export function fetchCommissioneSedute(
   if (params.leg != null) qs.set('leg', String(params.leg))
   if (params.sort) qs.set('sort', params.sort)
   if (params.q && params.q.trim().length >= 2) qs.set('q', params.q.trim())
+  if (params.year != null) qs.set('year', String(params.year))
+  if (params.tipologia) qs.set('tipologia', params.tipologia)
+  if (params.conTesto) qs.set('conTesto', 'true')
   const tail = qs.toString() ? `?${qs.toString()}` : ''
   return getJson<CommissioneSeduteResponse>(
     `${BASE}/commissioni/${encodeURIComponent(slug)}/sedute${tail}`,
