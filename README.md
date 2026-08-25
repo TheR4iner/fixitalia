@@ -93,6 +93,28 @@ are working on that section, pull a slice rather than the whole thing:
 npx tsx scripts/ingest.ts parlamento --chamber camera --legislatura 19 --limit 20
 ```
 
+`parlamento-commissioni` ingests committee transcripts (audizioni, indagini
+conoscitive). It is a bigger corpus than the plenary one -- 6,670 Camera
+sittings across legislatures 17-19 -- so survey before committing storage:
+
+```bash
+# What is there, without downloading any of it
+npx tsx scripts/ingest.ts parlamento-commissioni --chamber camera --all-legislatures --index-only
+
+# A usable slice
+npx tsx scripts/ingest.ts parlamento-commissioni --chamber camera --legislatura 19 --limit 20
+```
+
+Senato committee work is published as third-person *sommari* rather than
+verbatim transcripts, and sits behind the same WAF as its plenary sittings, so
+it is slow and clearly labelled as a summary throughout the UI. See
+[`project-kb/Parlamento commissioni.md`](./project-kb/Parlamento%20commissioni.md)
+for the full re-run playbook and the known limits.
+
+Set `PARLAMENTO_AUTOFETCH_COMMISSIONI=true` to have the daily scheduler keep
+the current month of Camera committee transcripts up to date. It is off by
+default because it grows the corpus.
+
 ### Checks
 
 `npm run lint`, `npx tsc --noEmit`, `npm run test:run`, and

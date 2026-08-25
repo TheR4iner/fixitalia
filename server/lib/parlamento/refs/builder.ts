@@ -20,13 +20,31 @@ interface SedutaForRefs {
   chamber: 'camera' | 'senato'
   numero: number
   legislatura: number
+  /** 'assemblea' | 'commissione'; denormalised onto every ref row. */
+  organo?: string
+  /**
+   * Overrides the `<chamber-prefix>-<numero>` half of the generated ref id.
+   *
+   * Assembly callers leave this unset and keep the historical id format
+   * byte-for-byte, which matters: changing it would strand every ref row
+   * already in the corpus under an id nothing re-derives.
+   *
+   * Committee callers MUST set it. Committee resoconti are numbered
+   * per-committee, so `numero` alone is not unique within a chamber -- two
+   * committees both sitting for the Nth time would generate colliding ref
+   * ids and silently overwrite each other.
+   */
+  idScope?: string
 }
 
 // Build the rows that will be inserted into parlamento_riferimenti for
 // a single intervento.
 //
 // Deterministic id format:
-//   parlamento_riferimenti:<chamber-prefix>-<seduta_numero>-<intervento_posizione>-<parser_version>-<start>
+//   parlamento_riferimenti:<scope>-<intervento_posizione>-<parser_version>-<start>
+//
+// where <scope> defaults to <chamber-prefix>-<seduta_numero> and is
+// overridden by SedutaForRefs.idScope for committee sittings (see below).
 //
 // The chamber prefix (c|s) keeps Camera and Senato seduta-numero
 // spaces disjoint. start is unique within (intervento, parser_version)
@@ -42,8 +60,9 @@ export function buildRifRows(
 ): Array<Record<string, unknown>> {
   const refs = parseRefs(intervento.testo, ctx)
   const prefix = seduta.chamber === 'camera' ? 'c' : 's'
+  const scope = seduta.idScope ?? `${prefix}-${seduta.numero}`
   return refs.map((r) => {
-    const idTag = `${prefix}-${seduta.numero}-${intervento.posizione}-${PARSER_VERSION}-${r.start}`
+    const idTag = `${scope}-${intervento.posizione}-${PARSER_VERSION}-${r.start}`
     // Resolve_status: AS bills with no synchronous url are pending the
     // SPARQL resolver; everything else is immediately resolved (ok).
     const status = r.tipo === 'as' && !r.url ? 'pending' : 'ok'
@@ -56,6 +75,7 @@ export function buildRifRows(
       // (project memory: link traversal in WHERE forces full scans).
       chamber: seduta.chamber,
       legislatura: seduta.legislatura,
+      organo: seduta.organo ?? 'assemblea',
       tipo: r.tipo,
       anno: r.anno,
       numero: r.numero,

@@ -33,6 +33,9 @@ export function fetchParlamentoCalendar(
 
 // ---- /sedute -------------------------------------------------------------
 
+export type Organo = 'assemblea' | 'commissione'
+export type TipoResoconto = 'stenografico' | 'sommario'
+
 export interface Seduta {
   id: string
   chamber: Chamber
@@ -47,6 +50,19 @@ export interface Seduta {
   interventi_n: number | null
   odg_n: number | null
   body_status: string | null
+  /** Absent on responses from endpoints that only ever serve plenary sittings. */
+  organo?: Organo | null
+  organo_cod?: string | null
+  organo_nome?: string | null
+  organo_slug?: string | null
+  /**
+   * 'sommario' means the text is a third-person SUMMARY written by the
+   * secretariat, not words the speaker said. The UI must label it, never
+   * render it as a quotation.
+   */
+  tipo_resoconto?: TipoResoconto | null
+  tipologia?: string | null
+  sottotipologia?: string | null
 }
 
 export interface SeduteResponse {
@@ -200,6 +216,18 @@ export interface SearchHit {
   data: string
   odg_titolo: string | null
   score: number
+  /** 'assemblea' | 'commissione'. */
+  organo?: Organo | null
+  /**
+   * 'sommario' hits are the secretariat's third-person paraphrase, not the
+   * speaker's words. Rendering one as a quotation attributes speech to
+   * someone who did not say it, so the result list must label it.
+   */
+  tipo_resoconto?: TipoResoconto | null
+  organo_nome?: string | null
+  organo_slug?: string | null
+  /** Record id of the sitting, e.g. "parlamento_sedute:cc-19-03-...". */
+  seduta_id?: string | null
 }
 
 export interface SearchResponse {
@@ -215,11 +243,21 @@ export interface SearchResponse {
 
 export function searchParlamento(
   q: string,
-  params: { chamber?: Chamber; page?: number } = {},
+  params: {
+    chamber?: Chamber
+    page?: number
+    organo?: Organo | 'tutti'
+    /** Committee slug; implies organo=commissione on the server. */
+    commissione?: string
+  } = {},
 ): Promise<SearchResponse> {
   const qs = new URLSearchParams({ q })
   if (params.chamber) qs.set('chamber', params.chamber)
   if (params.page) qs.set('page', String(params.page))
+  // Omitted means the backend default (plenary only), which is what an
+  // existing caller expects.
+  if (params.organo) qs.set('organo', params.organo)
+  if (params.commissione) qs.set('commissione', params.commissione)
   return getJson<SearchResponse>(`${BASE}/search?${qs.toString()}`)
 }
 
@@ -552,4 +590,168 @@ export function sedutaUrl(
 ): string {
   const base = `/parlamento/sedute/${chamber}/${legislatura}/${numero}`
   return anchor ? `${base}#${anchor}` : base
+}
+
+// ---- /commissioni --------------------------------------------------------
+//
+// Committee sittings live in the same corpus as plenary ones but are
+// addressed differently: a committee resoconto is numbered per-committee, so
+// `numero` is not unique within a chamber and legislature. Every committee
+// endpoint therefore keys on a document *scope* (the stable id the ingest
+// assigns, e.g. `cc-19-03-indag-c03-commercio-6`) rather than on a number.
+
+export interface Commissione {
+  organo_slug: string
+  organo_cod: string | null
+  organo_nome: string | null
+  chamber: Chamber
+  tipo_resoconto: TipoResoconto | null
+  /** Sittings ingested for this committee. */
+  n: number
+  prima: string | null
+  ultima: string | null
+  /** Sum of interventi across those sittings; null before any body pass. */
+  interventi: number | null
+}
+
+export type CommissioniSort = 'sedute' | 'recenti' | 'nome' | 'interventi'
+
+export interface CommissioniResponse {
+  data: Commissione[]
+  total: number
+  facets: { anni: number[]; legislature: number[] }
+}
+
+export interface CommissioniParams {
+  chamber?: Chamber
+  leg?: number
+  /** Committees that sat in this calendar year. */
+  year?: number
+  /** 'stenografico' | 'sommario'. */
+  tipo?: TipoResoconto
+  /** Only committees with at least one ingested transcript. */
+  conTesto?: boolean
+  sort?: CommissioniSort
+}
+
+export function fetchCommissioni(
+  params: CommissioniParams = {},
+): Promise<CommissioniResponse> {
+  const qs = new URLSearchParams()
+  if (params.chamber) qs.set('chamber', params.chamber)
+  if (params.leg != null) qs.set('leg', String(params.leg))
+  if (params.year != null) qs.set('year', String(params.year))
+  if (params.tipo) qs.set('tipo', params.tipo)
+  if (params.conTesto) qs.set('conTesto', 'true')
+  if (params.sort) qs.set('sort', params.sort)
+  const tail = qs.toString() ? `?${qs.toString()}` : ''
+  return getJson<CommissioniResponse>(`${BASE}/commissioni${tail}`)
+}
+
+export interface CommissioneFacets {
+  /** Calendar years this committee sat, newest first. */
+  anni: number[]
+  legislature: number[]
+  /** Camera sitting kinds present for this committee (indag, audiz2, ...). */
+  tipologie: string[]
+}
+
+export interface CommissioneSeduteResponse {
+  data: Seduta[]
+  page: number
+  pageSize: number
+  total: number
+  has_more: boolean
+  /** Values that actually exist for this committee, for populating filters. */
+  facets: CommissioneFacets
+}
+
+export interface CommissioneSeduteParams {
+  page?: number
+  pageSize?: number
+  leg?: number
+  sort?: SortOrder
+  /** Title filter; ignored below 2 characters. */
+  q?: string
+  year?: number
+  tipologia?: string
+  /** Only sittings whose transcript has been ingested. */
+  conTesto?: boolean
+}
+
+export function fetchCommissioneSedute(
+  slug: string,
+  params: CommissioneSeduteParams = {},
+): Promise<CommissioneSeduteResponse> {
+  const qs = new URLSearchParams()
+  if (params.page != null) qs.set('page', String(params.page))
+  if (params.pageSize != null) qs.set('pageSize', String(params.pageSize))
+  if (params.leg != null) qs.set('leg', String(params.leg))
+  if (params.sort) qs.set('sort', params.sort)
+  if (params.q && params.q.trim().length >= 2) qs.set('q', params.q.trim())
+  if (params.year != null) qs.set('year', String(params.year))
+  if (params.tipologia) qs.set('tipologia', params.tipologia)
+  if (params.conTesto) qs.set('conTesto', 'true')
+  const tail = qs.toString() ? `?${qs.toString()}` : ''
+  return getJson<CommissioneSeduteResponse>(
+    `${BASE}/commissioni/${encodeURIComponent(slug)}/sedute${tail}`,
+  )
+}
+
+export function fetchCommissioneSedutaDetail(
+  scope: string,
+): Promise<SedutaDetailResponse> {
+  return getJson<SedutaDetailResponse>(
+    `${BASE}/commissioni/seduta/${encodeURIComponent(scope)}`,
+  )
+}
+
+export function fetchCommissioneInterventi(
+  scope: string,
+  page = 1,
+  pageSize = 200,
+): Promise<InterventiResponse> {
+  const qs = new URLSearchParams({ page: String(page), pageSize: String(pageSize) })
+  return getJson<InterventiResponse>(
+    `${BASE}/commissioni/seduta/${encodeURIComponent(scope)}/interventi?${qs.toString()}`,
+  )
+}
+
+/**
+ * Extract the document scope from a SurrealDB record id.
+ *
+ * Ids arrive as "parlamento_sedute:cc-19-03-indag-c03-commercio-6". An id
+ * containing dashes is quoted, and the delimiter depends on which layer
+ * stringified it: SurrealQL's type::string() uses BACKTICKS, while the JS
+ * SDK's String(RecordId) uses angle brackets. Both reach the client -- the
+ * listing endpoints project through type::string -- so stripping only one
+ * form leaves a stray delimiter in the scope and every reader link 400s.
+ */
+export function scopeFromRecordId(recordId: string | null | undefined): string | null {
+  if (!recordId) return null
+  const raw = recordId.includes(':') ? recordId.slice(recordId.indexOf(':') + 1) : recordId
+  const trimmed = raw.replace(/^[`\u27E8<]|[`\u27E9>]$/g, '')
+  return trimmed || null
+}
+
+/** Reader URL for a committee sitting, given its record id. */
+export function commissioneSedutaUrl(
+  recordId: string | null | undefined,
+  anchor?: string,
+): string | null {
+  const scope = scopeFromRecordId(recordId)
+  if (!scope) return null
+  return `/parlamento/commissioni/seduta/${encodeURIComponent(scope)}${anchor ? `#${anchor}` : ''}`
+}
+
+/** Search URL for the transcript search, optionally scoped to one committee. */
+export function ricercaUrl(
+  q: string,
+  opts: { organo?: Organo | 'tutti'; commissione?: string; chamber?: Chamber } = {},
+): string {
+  const qs = new URLSearchParams({ q })
+  if (opts.commissione) qs.set('commissione', opts.commissione)
+  else if (opts.organo && opts.organo !== 'assemblea') qs.set('organo', opts.organo)
+  if (opts.chamber) qs.set('chamber', opts.chamber)
+  return `/parlamento/cerca?${qs.toString()}`
 }

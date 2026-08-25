@@ -129,6 +129,9 @@ const INTERVENTI_SETTINGS = {
     'oratore_id_persona',
     'seduta',
     'seduta_data',
+    'organo',
+    'tipo_resoconto',
+    'organo_slug',
   ],
   sortableAttributes: ['seduta_data'],
   stopWords: ITALIAN_STOPWORDS,
@@ -193,6 +196,10 @@ export const INTERVENTO_DOC_PROJECTION = `
   seduta_id.legislatura AS legislatura,
   seduta_id.numero AS seduta_numero,
   seduta_id.data AS seduta_data,
+  seduta_id.organo AS organo,
+  seduta_id.tipo_resoconto AS tipo_resoconto,
+  seduta_id.organo_slug AS organo_slug,
+  seduta_id.organo_nome AS organo_nome,
   odg_id.titolo AS odg_titolo`
 
 export interface InterventoRow {
@@ -208,6 +215,10 @@ export interface InterventoRow {
   legislatura?: number | null
   seduta_numero?: number | null
   seduta_data?: unknown
+  organo?: string | null
+  tipo_resoconto?: string | null
+  organo_slug?: string | null
+  organo_nome?: string | null
   odg_titolo?: string | null
 }
 
@@ -225,6 +236,20 @@ export interface InterventoDoc {
   legislatura: number | null
   seduta_numero: number | null
   seduta_data: number | null
+  /**
+   * 'assemblea' | 'commissione'. Filterable so the reader can scope a search
+   * to plenary work, committee work, or both.
+   */
+  organo: string | null
+  /**
+   * 'stenografico' | 'sommario'. This one is an integrity guard rather than a
+   * convenience: Senato committee documents are third-person SUMMARIES, so a
+   * snippet from one is the secretariat's paraphrase and must never be
+   * rendered as a quotation. The reader needs this on every hit to label it.
+   */
+  tipo_resoconto: string | null
+  organo_slug: string | null
+  organo_nome: string | null
   odg_titolo: string | null
 }
 
@@ -259,6 +284,10 @@ export function mapInterventoRow(row: InterventoRow): InterventoDoc {
     legislatura: typeof row.legislatura === 'number' ? row.legislatura : null,
     seduta_numero: typeof row.seduta_numero === 'number' ? row.seduta_numero : null,
     seduta_data: toEpochSeconds(row.seduta_data),
+    organo: row.organo ?? 'assemblea',
+    tipo_resoconto: row.tipo_resoconto ?? 'stenografico',
+    organo_slug: row.organo_slug ?? null,
+    organo_nome: row.organo_nome ?? null,
     odg_titolo: row.odg_titolo ?? null,
   }
 }

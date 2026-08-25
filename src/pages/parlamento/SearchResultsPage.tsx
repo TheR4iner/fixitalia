@@ -14,7 +14,13 @@ import {
 import { Input } from '@/components/ui/input'
 import { Skeleton } from '@/components/ui/skeleton'
 import { useQuery } from '@/hooks/useQuery'
-import { personaUrl, searchParlamento, sedutaUrl } from '@/services/parlamento'
+import {
+  commissioneSedutaUrl,
+  personaUrl,
+  searchParlamento,
+  sedutaUrl,
+  type Organo,
+} from '@/services/parlamento'
 import { isChamber } from '@/lib/parlamento-params'
 import { formatDate, formatNumber } from '@/lib/format'
 import { t } from '@/i18n/it'
@@ -66,15 +72,36 @@ export default function SearchResultsPage() {
   const q = initialQ
   const chamber = isChamber(initialChamber) ? initialChamber : null
 
-  const queryKey = ['parlamento/search', q, chamber] as const
+  // Scope defaults to the Aula so an existing bookmark returns what it always
+  // did; committee work is opt-in rather than silently folded in.
+  const rawScope = params.get('organo')
+  const scope: Organo | 'tutti' =
+    rawScope === 'commissione' || rawScope === 'tutti' ? rawScope : 'assemblea'
+  // A committee scope overrides the organo toggle: asking for one committee
+  // already implies the committee corpus.
+  const commissione = params.get('commissione') ?? undefined
+
+  const queryKey = ['parlamento/search', q, chamber, scope, commissione] as const
   const result = useQuery(
     queryKey,
     () =>
       q.length < 2
         ? Promise.resolve({ data: [], page: 1, pageSize: 0, total: 0, q })
-        : searchParlamento(q, { chamber: chamber ?? undefined, page: 1 }),
+        : searchParlamento(q, {
+            chamber: chamber ?? undefined,
+            page: 1,
+            organo: commissione ? undefined : scope,
+            commissione,
+          }),
     { ttlMs: 5 * 60 * 1000 },
   )
+
+  function setScope(next: Organo | 'tutti') {
+    const np = new URLSearchParams(params)
+    if (next === 'assemblea') np.delete('organo')
+    else np.set('organo', next)
+    setParams(np, { replace: true })
+  }
 
   function onSubmit(e: FormEvent<HTMLFormElement>) {
     e.preventDefault()
@@ -82,6 +109,8 @@ export default function SearchResultsPage() {
     if (next.length < 2) return
     const np = new URLSearchParams({ q: next })
     if (chamber) np.set('chamber', chamber)
+    if (commissione) np.set('commissione', commissione)
+    else if (scope !== 'assemblea') np.set('organo', scope)
     setParams(np)
   }
 
@@ -112,6 +141,58 @@ export default function SearchResultsPage() {
         </Button>
       </form>
 
+      {commissione ? (
+        <div className="flex flex-wrap items-center gap-2 text-sm">
+          <span className="text-muted-foreground">
+            {t.parlamento.commissioni.searchInside}:
+          </span>
+          <Link
+            to={`/parlamento/commissioni/${encodeURIComponent(commissione)}`}
+            className="rounded-md border border-border px-2 py-1 font-medium hover:bg-muted"
+          >
+            {result.data?.data?.[0]?.organo_nome ?? commissione}
+          </Link>
+          <button
+            type="button"
+            onClick={() => {
+              const np = new URLSearchParams(params)
+              np.delete('commissione')
+              np.set('organo', 'commissione')
+              setParams(np)
+            }}
+            className="text-muted-foreground underline underline-offset-4 hover:text-foreground"
+          >
+            {t.parlamento.commissioni.openInSearch}
+          </button>
+        </div>
+      ) : (
+      <fieldset className="flex flex-wrap items-center gap-2">
+        <legend className="sr-only">{t.parlamento.commissioni.searchScopeLegend}</legend>
+        {(
+          [
+            ['assemblea', t.parlamento.commissioni.searchScopeAula],
+            ['commissione', t.parlamento.commissioni.searchScopeCommissioni],
+            ['tutti', t.parlamento.commissioni.searchScopeAll],
+          ] as const
+        ).map(([value, label]) => (
+          <button
+            key={value}
+            type="button"
+            onClick={() => setScope(value)}
+            aria-pressed={scope === value}
+            className={
+              'rounded-md border px-3 py-1.5 text-sm transition-colors ' +
+              (scope === value
+                ? 'border-foreground bg-foreground text-background'
+                : 'border-border text-muted-foreground hover:bg-muted hover:text-foreground')
+            }
+          >
+            {label}
+          </button>
+        ))}
+      </fieldset>
+      )}
+
       {q.length < 2 ? null : result.status === 'loading' ? (
         <div className="space-y-3">
           {Array.from({ length: 5 }).map((_, i) => (
@@ -132,14 +213,21 @@ export default function SearchResultsPage() {
           </p>
           <ul className="space-y-4">
             {hits.map((h) => {
-              const sedutaHref = sedutaUrl(h.chamber, h.legislatura, h.numero, h.anchor)
+              // Committee hits cannot be addressed by numero (committee
+              // resoconti are numbered per-committee), so they link through
+              // the sitting's record id instead.
+              const isCommissione = h.organo === 'commissione'
+              const sedutaHref =
+                (isCommissione ? commissioneSedutaUrl(h.seduta_id, h.anchor) : null) ??
+                sedutaUrl(h.chamber, h.legislatura, h.numero, h.anchor)
+              const isSommario = h.tipo_resoconto === 'sommario'
               return (
                 <li
                   // Search spans every legislature, and seduta numbers restart
                   // at 1 in each one -- without legislatura, two hits at the
                   // same position of the same-numbered seduta in different
                   // legislatures collide and React reuses the wrong node.
-                  key={`${h.chamber}-${h.legislatura}-${h.numero}-${h.posizione}`}
+                  key={`${h.seduta_id ?? `${h.chamber}-${h.legislatura}-${h.numero}`}-${h.posizione}`}
                 >
                   <Card>
                     <CardHeader className="pb-3">
@@ -168,6 +256,14 @@ export default function SearchResultsPage() {
                             {h.gruppo}
                           </Badge>
                         ) : null}
+                        {/* A sommario paraphrases the speaker in the third
+                            person. Without this label the snippet reads as a
+                            direct quotation of someone who never said it. */}
+                        {isSommario ? (
+                          <Badge variant="outline" className="text-[10px]">
+                            {t.parlamento.commissioni.sommarioBadge}
+                          </Badge>
+                        ) : null}
                         <span className="ml-auto inline-flex items-baseline gap-1.5 text-xs text-muted-foreground">
                           <Link
                             to={sedutaHref}
@@ -176,12 +272,25 @@ export default function SearchResultsPage() {
                             {formatDate(h.data)}
                           </Link>
                           <span aria-hidden="true">·</span>
-                          <Link
-                            to={sedutaHref}
-                            className="underline decoration-muted-foreground/30 underline-offset-4 hover:decoration-foreground"
-                          >
-                            seduta n. {h.numero}
-                          </Link>
+                          {/* For a committee hit the committee name is the
+                              useful anchor, and it points at the committee
+                              rather than the single sitting -- that is the
+                              navigation step a reader actually wants next. */}
+                          {isCommissione && h.organo_slug ? (
+                            <Link
+                              to={`/parlamento/commissioni/${encodeURIComponent(h.organo_slug)}`}
+                              className="underline decoration-muted-foreground/30 underline-offset-4 hover:decoration-foreground"
+                            >
+                              {h.organo_nome ?? 'commissione'}
+                            </Link>
+                          ) : (
+                            <Link
+                              to={sedutaHref}
+                              className="underline decoration-muted-foreground/30 underline-offset-4 hover:decoration-foreground"
+                            >
+                              seduta n. {h.numero}
+                            </Link>
+                          )}
                         </span>
                       </div>
                       {h.odg_titolo ? (
