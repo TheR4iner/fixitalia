@@ -243,7 +243,13 @@ export interface SearchResponse {
 
 export function searchParlamento(
   q: string,
-  params: { chamber?: Chamber; page?: number; organo?: Organo | 'tutti' } = {},
+  params: {
+    chamber?: Chamber
+    page?: number
+    organo?: Organo | 'tutti'
+    /** Committee slug; implies organo=commissione on the server. */
+    commissione?: string
+  } = {},
 ): Promise<SearchResponse> {
   const qs = new URLSearchParams({ q })
   if (params.chamber) qs.set('chamber', params.chamber)
@@ -251,6 +257,7 @@ export function searchParlamento(
   // Omitted means the backend default (plenary only), which is what an
   // existing caller expects.
   if (params.organo) qs.set('organo', params.organo)
+  if (params.commissione) qs.set('commissione', params.commissione)
   return getJson<SearchResponse>(`${BASE}/search?${qs.toString()}`)
 }
 
@@ -632,13 +639,21 @@ export interface CommissioneSeduteResponse {
 
 export function fetchCommissioneSedute(
   slug: string,
-  params: { page?: number; pageSize?: number; leg?: number; sort?: SortOrder } = {},
+  params: {
+    page?: number
+    pageSize?: number
+    leg?: number
+    sort?: SortOrder
+    /** Title filter within this committee; ignored below 2 characters. */
+    q?: string
+  } = {},
 ): Promise<CommissioneSeduteResponse> {
   const qs = new URLSearchParams()
   if (params.page != null) qs.set('page', String(params.page))
   if (params.pageSize != null) qs.set('pageSize', String(params.pageSize))
   if (params.leg != null) qs.set('leg', String(params.leg))
   if (params.sort) qs.set('sort', params.sort)
+  if (params.q && params.q.trim().length >= 2) qs.set('q', params.q.trim())
   const tail = qs.toString() ? `?${qs.toString()}` : ''
   return getJson<CommissioneSeduteResponse>(
     `${BASE}/commissioni/${encodeURIComponent(slug)}/sedute${tail}`,
@@ -689,4 +704,16 @@ export function commissioneSedutaUrl(
   const scope = scopeFromRecordId(recordId)
   if (!scope) return null
   return `/parlamento/commissioni/seduta/${encodeURIComponent(scope)}${anchor ? `#${anchor}` : ''}`
+}
+
+/** Search URL for the transcript search, optionally scoped to one committee. */
+export function ricercaUrl(
+  q: string,
+  opts: { organo?: Organo | 'tutti'; commissione?: string; chamber?: Chamber } = {},
+): string {
+  const qs = new URLSearchParams({ q })
+  if (opts.commissione) qs.set('commissione', opts.commissione)
+  else if (opts.organo && opts.organo !== 'assemblea') qs.set('organo', opts.organo)
+  if (opts.chamber) qs.set('chamber', opts.chamber)
+  return `/parlamento/cerca?${qs.toString()}`
 }
