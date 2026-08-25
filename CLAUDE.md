@@ -96,7 +96,7 @@ with `appalti` or `opere-incompiute` for a working site.
 │   ├── scripts/                 # Ingest CLI and one-off probes
 │   ├── data/                    # Persisted files -- gitignored
 │   └── test/                    # Backend tests
-├── .github/workflows/           # CI, release, security, Claude review, Dependabot auto-merge
+├── .github/workflows/           # CI, release, security, Claude review, Dependabot automation
 └── project-kb/                  # Long-lived notes per topic (see below)
 ```
 
@@ -221,11 +221,35 @@ job for the root one, leaving ten frontend advisories unattempted with nothing
 to signal it. Scheduled version updates are driven by a cron over every
 directory in the config instead.
 
+The config also sets a `cooldown`, so no version update is proposed until the
+release has been on the registry for a few days. That is not about broken
+releases, which CI catches, but about compromised ones: in every major npm
+supply-chain incident the malicious version was live for hours to a couple of
+days before being pulled. Cooldown deliberately does not apply to security
+updates, where the advisory is already public and waiting only costs exposure.
+
 `dependabot-auto-merge.yml` squash-merges Dependabot's patch and minor pull
-requests once every check on the head commit passes, and labels anything
-carrying a major bump `needs-review` instead. It runs on `pull_request_target`
-because Dependabot-triggered `pull_request` runs get a read-only token; it
-therefore never checks out the pull request's code, and must stay that way.
+requests once every check on the head commit passes, and labels the rest
+`needs-review` instead. Two things are held back: any major, and anything
+touching the deny list in that file (`surrealdb`, `playwright`, `linkedom`,
+`csv-parse`, `express`). The deny list exists because auto-merge is a bet that
+a green pipeline means a working application, and for the ingest path that bet
+does not hold: those tests run against captured fixtures, not against live
+upstream pages or a live database, so a behavioural change in HTML parsing or
+in a client's result shape passes every check and breaks ingest silently. Add
+to the list when a runtime dependency's correctness rests on something CI does
+not run; remove from it when real coverage arrives.
+
+The workflow runs on `pull_request_target` because Dependabot-triggered
+`pull_request` runs get a read-only token; it therefore never checks out the
+pull request's code, and must stay that way.
+
+`dependency-triage.yml` picks up what auto-merge refused. Once a week it reads
+the changelogs behind the `needs-review` pile and comments a MERGE / MERGE WITH
+CARE / HOLD verdict on each. It is one scheduled invocation over the whole
+pile, not one per pull request: a model reading a lockfile diff knows less than
+CI does, while a model reading a migration guide knows something CI cannot. It
+needs `ANTHROPIC_API_KEY` and skips cleanly without it.
 
 To trigger a release:
 

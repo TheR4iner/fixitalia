@@ -14,10 +14,70 @@ Dependabot treats them as two separate projects.
 ## Current solution
 
 `.github/dependabot.yml` configures grouped weekly version updates for both
-directories plus monthly `github-actions` updates.
+directories plus monthly `github-actions` updates, behind a `cooldown`.
 `.github/workflows/dependabot-auto-merge.yml` waits for every check on the head
-commit and squash-merges patch and minor bumps; anything carrying a major bump
-is labelled `needs-review` and left for a human.
+commit and squash-merges patch and minor bumps; the rest is labelled
+`needs-review`. `.github/workflows/dependency-triage.yml` then reviews that pile
+once a week.
+
+The policy, in one table:
+
+| Category | Policy |
+|---|---|
+| devDependencies, any semver level | auto-merge on green CI, 3-day cooldown |
+| Runtime deps, patch and minor | auto-merge on green CI, 5 to 7-day cooldown |
+| Runtime deps on the deny list | never auto-merge |
+| Any major | never auto-merge, label `needs-review` |
+| Security updates, non-major | auto-merge on green CI, no cooldown |
+
+Two ideas do the work, and they are orthogonal. **CI protects against a broken
+release. Cooldown protects against a malicious one.** Auto-merging with no
+cooldown makes this repository's pipeline the fastest possible path from a
+hijacked npm publish into `main`; a three to seven day quarantine turns almost
+every historical npm supply-chain incident (event-stream 2018, ua-parser-js
+2021, node-ipc 2022, the 2025 token-stealing worm) into a non-event, because
+the malicious version was yanked within that window. Dependabot's `cooldown`
+option applies to version updates only, which is right: a security update is
+fixing something already public.
+
+### The deny list, and why it is not about semver
+
+`surrealdb`, `playwright`, `linkedom`, `csv-parse` and `express` never
+auto-merge at any semver level.
+
+Auto-merge delegates the merge decision to the test suite, so it is only as
+honest as the suite. The frontend gate is genuinely good: 100 tests, `tsc`,
+lint and a real production build, which a bad `react-router` or `recharts`
+bump will fail. The backend gate is weaker than it looks. The 109 tests
+exercise the ingest parsers against **captured fixtures**, not against live
+Senato or Camera pages and not against a live SurrealDB. A `linkedom` release
+that changes how it recovers from malformed markup, or a `surrealdb` client
+release that changes a result shape, passes every check and breaks ingest
+silently. That is the exact failure mode `claude-review.yml`'s prompt calls the
+worst one here: a page that looks right and is wrong.
+
+`xlsx` is pinned to a CDN tarball URL rather than a registry version, so
+Dependabot cannot propose updates for it at all. It is not on the deny list
+because it never reaches one.
+
+### Where a model belongs, and where it does not
+
+Not per pull request. A lockfile diff is thousands of lines of integrity
+hashes, and a model reading it has strictly *less* information than the test
+run does: it can guess whether `postcss` 8.5.26 breaks something, while CI
+proves it. Paying for a guess at what a cheaper deterministic check already
+settled is the wrong shape, independent of cost.
+
+`dependency-triage.yml` places it where the economics invert: one scheduled
+call a week over the `needs-review` pile, reading upstream changelogs and
+migration guides and checking whether the breaking changes are reachable from
+this codebase. That is comprehension over prose, which no test suite performs.
+The other good placement is per incident rather than per pull request: when a
+major breaks CI, hand a model the failing job and let it do the migration.
+
+Because that job reads third-party release notes, its prompt states that pull
+request bodies and changelogs are untrusted data. It is granted no tool that
+writes anything except `gh pr comment`.
 
 ### Trap 1: security-only mode does not cover every manifest
 

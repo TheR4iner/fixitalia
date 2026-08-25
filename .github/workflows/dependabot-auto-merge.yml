@@ -38,24 +38,64 @@ jobs:
         with:
           github-token: ${{ secrets.GITHUB_TOKEN }}
 
-      # For a grouped pull request, `update-type` is the largest bump in the
-      # group, so a group containing one major is treated as a major.
+      # Two gates. Either one sends the pull request to a human.
+      #
+      # 1. Semver. For a grouped pull request `update-type` is the largest
+      #    bump in the group, so a group containing one major is a major.
+      #
+      # 2. The deny list. Auto-merge is a bet that a green pipeline means a
+      #    working application, and for these packages that bet does not
+      #    hold. The backend tests exercise the ingest parsers against
+      #    captured fixtures, not against live upstream pages or a live
+      #    database, so a change in how `linkedom` handles malformed markup
+      #    or in what shape the `surrealdb` client returns can pass every
+      #    check and break ingest silently. That is the failure this project
+      #    cares about most: a page that looks right and is wrong.
+      #
+      #    Add to the list when a runtime dependency's correctness is proved
+      #    by something CI does not run. Remove from it when real coverage
+      #    arrives.
       - name: Decide
         id: decide
         env:
           UPDATE_TYPE: ${{ steps.meta.outputs.update-type }}
           DEPENDENCY_NAMES: ${{ steps.meta.outputs.dependency-names }}
         run: |
+          set -euo pipefail
+
+          DENY_LIST='surrealdb playwright linkedom csv-parse express'
+
+          # No metadata means no basis for a decision, so do not merge on it.
+          hold=''
+          if [[ -z "${DEPENDENCY_NAMES// /}" ]]; then
+            hold='dependency-names was empty'
+          fi
+
           case "$UPDATE_TYPE" in
-            version-update:semver-patch|version-update:semver-minor)
-              echo "merge=true" >> "$GITHUB_OUTPUT"
-              echo "Patch or minor bump of: $DEPENDENCY_NAMES -- eligible."
-              ;;
-            *)
-              echo "merge=false" >> "$GITHUB_OUTPUT"
-              echo "$UPDATE_TYPE of: $DEPENDENCY_NAMES -- leaving for review."
-              ;;
+            version-update:semver-patch|version-update:semver-minor) ;;
+            *) hold="$UPDATE_TYPE" ;;
           esac
+
+          # `dependency-names` is comma-separated, and a grouped pull request
+          # lists every member, so one denied package holds the whole group.
+          IFS=',' read -ra names <<< "$DEPENDENCY_NAMES"
+          for raw in "${names[@]}"; do
+            name="$(echo "$raw" | tr -d '[:space:]')"
+            [[ -n "$name" ]] || continue
+            for denied in $DENY_LIST; do
+              if [[ "$name" == "$denied" ]]; then
+                hold="${hold:+$hold, }not covered by CI: $name"
+              fi
+            done
+          done
+
+          if [[ -z "$hold" ]]; then
+            echo 'merge=true' >> "$GITHUB_OUTPUT"
+            echo "Patch or minor bump of: $DEPENDENCY_NAMES -- eligible."
+          else
+            echo 'merge=false' >> "$GITHUB_OUTPUT"
+            echo "Holding $DEPENDENCY_NAMES for review ($hold)."
+          fi
 
       - name: Label majors for review
         if: steps.decide.outputs.merge == 'false'
