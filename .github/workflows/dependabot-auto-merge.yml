@@ -104,14 +104,47 @@ jobs:
           PR_URL: ${{ github.event.pull_request.html_url }}
         run: gh pr edit "$PR_URL" --add-label 'needs-review' || true
 
-      # Waits for every check on the head commit. Exits non-zero the moment one
-      # fails, which leaves the pull request open and unmerged.
-      - name: Wait for CI
+      # Waits for the checks that branch protection actually requires, then
+      # merges. Exits non-zero the moment a required check fails, which leaves
+      # the pull request open and unmerged.
+      #
+      # `--required` is load-bearing, not a refinement. Without it, `gh pr
+      # checks --watch` waits for EVERY check on the pull request, and this
+      # job is itself one of them, so it waits on itself until the job
+      # timeout. That is not hypothetical: it is what happened to #18, which
+      # sat with every real check green and `Auto-merge` pending until it was
+      # cancelled by hand. Requiring at least one branch protection check is
+      # therefore a prerequisite for this workflow, since `--required` has
+      # nothing to wait for otherwise.
+      #
+      # The tidier alternative is `gh pr merge --auto`, which hands the wait
+      # to GitHub and costs no runner minutes, but it needs "Allow auto-merge"
+      # enabled in the repository settings. Switch to it if that gets turned
+      # on.
+      - name: Wait for required checks
         if: steps.decide.outputs.merge == 'true'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           PR_URL: ${{ github.event.pull_request.html_url }}
-        run: gh pr checks "$PR_URL" --watch --fail-fast --interval 30
+        run: |
+          set -euo pipefail
+
+          # A check that has not been created yet makes `gh pr checks` exit
+          # non-zero rather than wait, so give the workflows a moment to
+          # register before watching them.
+          for attempt in 1 2 3 4 5 6; do
+            if gh pr checks "$PR_URL" --required >/dev/null 2>&1; then
+              break
+            fi
+            if (( attempt == 6 )); then
+              echo "::error::No required checks appeared on $PR_URL after five minutes. Branch protection must require at least one check for this workflow to gate on."
+              exit 1
+            fi
+            echo "No required checks yet; retrying in 50s (attempt $attempt/6)."
+            sleep 50
+          done
+
+          gh pr checks "$PR_URL" --watch --fail-fast --required --interval 30
 
       - name: Merge
         if: steps.decide.outputs.merge == 'true'

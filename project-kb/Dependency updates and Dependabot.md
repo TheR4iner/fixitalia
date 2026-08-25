@@ -40,6 +40,29 @@ the malicious version was yanked within that window. Dependabot's `cooldown`
 option applies to version updates only, which is right: a security update is
 fixing something already public.
 
+### Trap 4: the auto-merge job waited on itself
+
+`gh pr checks --watch` waits for **every** check on the pull request, and the
+auto-merge job is itself one of them. The first grouped pull request it was
+supposed to merge (#18) sat with every real check green and `Auto-merge`
+pending until the job hit its thirty-minute timeout, and nothing about the
+symptom pointed at the cause.
+
+The fix is `--required`, which watches only the checks branch protection
+demands. That makes at least one required check a **prerequisite** for the
+workflow rather than a nicety: with none configured, `--required` has nothing
+to watch and exits non-zero. `main` currently requires `CI Success`.
+
+The tidier alternative is `gh pr merge --auto`, which hands the wait to GitHub
+and costs no runner minutes at all, but it needs "Allow auto-merge" enabled in
+the repository settings. Worth switching to if that ever gets turned on.
+
+A related note on branch protection, which was added to `main` while this was
+being built: `required_conversation_resolution` is on, so every inline comment
+the review workflow leaves must be resolved before a merge is possible. That is
+usually what you want, but it does mean the review bot can block a merge, and
+that resolving its threads is now part of the flow.
+
 ### The deny list, and why it is not about semver
 
 `surrealdb`, `playwright`, `linkedom`, `csv-parse` and `express` never
