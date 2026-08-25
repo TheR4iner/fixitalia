@@ -1,4 +1,5 @@
 import { ingestParlamento, type IngestParlamentoResult } from './ingest/parlamento/index.ts'
+import { ingestCommissioni } from './ingest/parlamento/commissioni.ts'
 import { runRefsPass } from './ingest/parlamento/refs.ts'
 import { runQuery } from './query.ts'
 
@@ -33,6 +34,21 @@ interface SchedulerConfig {
   legislatura: number
   timezone: string
   tickMs: number
+  /**
+   * Also refresh Camera committee transcripts for the CURRENT MONTH.
+   *
+   * Opt-in rather than on by default, for one reason: it grows the corpus.
+   * The committee archive is several times larger than the plenary one
+   * (legislature 17 alone holds 3,273 stenographic sittings), so turning this
+   * on is a storage decision an operator should make deliberately rather than
+   * discover.
+   *
+   * Scoped to Camera and to the current month on purpose. Camera is WAF-free
+   * and one month's listing is a single request, so the daily cost is small
+   * and bounded. Senato committee work is throttled at ~8s per document and
+   * belongs in a manual backfill campaign, never in a daily tick.
+   */
+  commissioni: boolean
 }
 
 function readConfig(): SchedulerConfig {
@@ -43,6 +59,7 @@ function readConfig(): SchedulerConfig {
     legislatura: clampInt(process.env.PARLAMENTO_AUTOFETCH_LEG, 19, 1, 99),
     timezone: process.env.PARLAMENTO_AUTOFETCH_TZ ?? 'Europe/Rome',
     tickMs: 60_000,
+    commissioni: process.env.PARLAMENTO_AUTOFETCH_COMMISSIONI === 'true',
   }
 }
 
@@ -181,6 +198,35 @@ async function runIngest(cfg: SchedulerConfig): Promise<void> {
     } else {
       retriesToday = 0
     }
+    // Camera committee transcripts for the current month, when enabled.
+    // Deliberately AFTER the plenary pass and inside its own try/catch: this
+    // is an addition to the daily job, and a failure here must not mask or
+    // abort the plenary result the rest of this function reports on.
+    if (cfg.commissioni) {
+      try {
+        const now = new Date()
+        const month = `${now.getUTCFullYear()}${String(now.getUTCMonth() + 1).padStart(2, '0')}`
+        const commResults = await ingestCommissioni({
+          chamber: 'camera',
+          legislatura: cfg.legislatura,
+          months: [month],
+        })
+        for (const r of commResults) {
+          const summary =
+            `commissioni ${r.chamber} index +${r.indexed}, body ok=${r.bodyOk} ` +
+            `partial=${r.bodyPartial} empty=${r.bodyEmpty} missing=${r.bodyMissing} ` +
+            `error=${r.bodyError} (${(r.durationMs / 1000).toFixed(1)}s)`
+          if (r.ok) console.log(`[scheduler] ${summary}`)
+          else console.error(`[scheduler] FAILED ${summary} -- ${r.error ?? 'unknown error'}`)
+        }
+      } catch (err) {
+        console.error(
+          '[scheduler] commissioni auto-fetch threw (plenary pass unaffected):',
+          err instanceof Error ? err.message : err,
+        )
+      }
+    }
+
     // After the body pass lands new sedute, run the refs pass with
     // --reresolve so:
     //   - any seduta whose refs_parser_version is now stale gets

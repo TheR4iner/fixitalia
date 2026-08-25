@@ -103,6 +103,33 @@ interface SedutaRow {
   body_status: string | null
 }
 
+// ---- organo scoping ----------------------------------------------------------
+//
+// parlamento_sedute holds both plenary sittings and committee sittings, and
+// (chamber, legislatura, numero) is unique only WITHIN one of those. So every
+// query here has to say which it means. Endpoints that address a single
+// sitting are hard-scoped to the plenary corpus and committee sittings get
+// their own routes keyed by document scope; endpoints that list or search take
+// an `organo` parameter and default to plenary, so an existing client sees
+// exactly the results it saw before committee data was ingested.
+
+const ORGANO_ASSEMBLEA = 'assemblea'
+const ORGANO_COMMISSIONE = 'commissione'
+
+/**
+ * Read the `organo` query parameter.
+ *
+ * Returns the organo to filter on, or null for "both". Defaults to the
+ * plenary corpus: silently widening existing endpoints to include committee
+ * work would change every already-published count and mix third-person Senato
+ * summaries into result sets that clients render as verbatim speech.
+ */
+function parseOrgano(raw: unknown): string | null {
+  if (raw === 'tutti' || raw === 'all') return null
+  if (raw === ORGANO_COMMISSIONE) return ORGANO_COMMISSIONE
+  return ORGANO_ASSEMBLEA
+}
+
 // ---- /calendar ---------------------------------------------------------------
 
 interface CalendarRow {
@@ -120,6 +147,11 @@ router.get('/calendar', async (req: Request, res: Response, next: NextFunction) 
 
     const where: string[] = ['body_status IN ["ok","pending","empty","error"]']
     const bindings: Record<string, unknown> = {}
+    const organo = parseOrgano(req.query.organo)
+    if (organo) {
+      where.push('organo = $organo')
+      bindings.organo = organo
+    }
     if (chamberFilter) {
       where.push('chamber = $chamber')
       bindings.chamber = chamberFilter
@@ -187,6 +219,11 @@ router.get('/sedute', async (req: Request, res: Response, next: NextFunction) =>
 
     const where: string[] = []
     const bindings: Record<string, unknown> = {}
+    const organo = parseOrgano(req.query.organo)
+    if (organo) {
+      where.push('organo = $organo')
+      bindings.organo = organo
+    }
     if (chamberFilter) {
       where.push('chamber = $chamber')
       bindings.chamber = chamberFilter
@@ -231,7 +268,9 @@ router.get('/sedute', async (req: Request, res: Response, next: NextFunction) =>
          type::string(id) AS id,
          chamber, legislatura, numero, data, titolo,
          source_url, html_url, xml_url, video_url,
-         interventi_n, odg_n, body_status
+         interventi_n, odg_n, body_status,
+         organo, organo_cod, organo_nome, organo_slug,
+         tipo_resoconto, tipologia, sottotipologia
        FROM parlamento_sedute WITH NOINDEX
        ${whereSql}
        ${orderSql}
@@ -306,7 +345,8 @@ router.get(
            source_url, html_url, xml_url, video_url,
            interventi_n, odg_n, body_status
          FROM parlamento_sedute
-         WHERE chamber = $chamber AND legislatura = $leg AND numero = $num
+         WHERE organo = "assemblea"
+           AND chamber = $chamber AND legislatura = $leg AND numero = $num
          LIMIT 1;`,
         { chamber, leg: legislatura, num: numero },
       )
@@ -314,60 +354,13 @@ router.get(
       if (!sedutaRow) return res.status(404).json({ error: 'seduta not found' })
       const { rawId: sedId, ...seduta } = sedutaRow
 
-      const [odgRows, oratoriRows] = await Promise.all([
-        runQuery<Array<{ posizione: number; titolo: string; anchor: string }>>(
-          `SELECT posizione, titolo, anchor
-           FROM parlamento_odg
-           WHERE seduta_id = $sed
-           ORDER BY posizione ASC;`,
-          { sed: sedId },
-        ),
-        runQuery<
-          Array<{
-            oratore_nome: string
-            id_persona: number | null
-            mandato_gruppo: string | null
-            transcript_gruppo: string | null
-            ruolo: string | null
-            n: number
-          }>
-        >(
-          // Speakers are grouped by their resolved mandato (chamber × leg ×
-          // id_persona). Camera transcripts don't carry the group inline so
-          // `gruppo` on interventi is null for those rows; the authoritative
-          // current-leg group is `mandato_id.gruppo_attuale`, populated by the
-          // deputati profile-scrape pass. Senato transcripts include the
-          // group inline (e.g. "GARAVAGLIA (LSP-PSd'Az).") so `gruppo` is set
-          // there and takes precedence on display.
-          `SELECT oratore_nome,
-                  mandato_id.id_persona AS id_persona,
-                  mandato_id.gruppo_attuale AS mandato_gruppo,
-                  gruppo AS transcript_gruppo,
-                  ruolo,
-                  count() AS n
-           FROM parlamento_interventi
-           WHERE seduta_id = $sed AND oratore_nome IS NOT NONE
-           GROUP BY oratore_nome, mandato_id.id_persona, mandato_id.gruppo_attuale, gruppo, ruolo;`,
-          { sed: sedId },
-        ),
-      ])
-
-      const oratori = (oratoriRows ?? [])
-        .slice()
-        .sort((a, b) => b.n - a.n)
-        .map((r) => ({
-          nome: r.oratore_nome,
-          id_persona: r.id_persona ?? null,
-          gruppo: r.transcript_gruppo ?? r.mandato_gruppo ?? null,
-          ruolo: r.ruolo,
-          interventi: r.n,
-        }))
+      const { odg, oratori } = await loadOdgAndOratori(sedId)
 
       // Historical seduta metadata is effectively immutable once ingested.
       setPublicCache(res, IMMUTABLE_MAXAGE)
       res.json({
         seduta,
-        odg: odgRows ?? [],
+        odg,
         oratori,
         source: SOURCE_URL,
       })
@@ -452,8 +445,13 @@ router.get(
       // handler for why traversing seduta_id.chamber / .numero forces a full
       // scan and the record-id form does not.
       const sedutaIdRows = await runQuery<Array<{ id: unknown; n: number | null }>>(
+        // organo is REQUIRED, not decorative: committee resoconti are
+        // numbered per-committee, so without it camera/19/1 matches the
+        // plenary sitting AND the first sitting of every committee, and
+        // LIMIT 1 would hand back whichever the planner reached first.
         `SELECT id, interventi_n AS n FROM parlamento_sedute
-         WHERE chamber = $chamber AND legislatura = $leg AND numero = $num
+         WHERE organo = "assemblea"
+           AND chamber = $chamber AND legislatura = $leg AND numero = $num
          LIMIT 1;`,
         { chamber, leg: legislatura, num: numero },
       )
@@ -461,81 +459,12 @@ router.get(
       if (!sedutaRow) return res.status(404).json({ error: 'seduta not found' })
       const sedId = sedutaRow.id
 
-      const rows = await runQuery<InterventoRow[]>(
-        `SELECT
-           id,
-           posizione, oratore_nome,
-           mandato_id.id_persona AS oratore_id_persona,
-           mandato_id.chamber AS oratore_chamber,
-           mandato_id.gruppo_attuale AS oratore_mandato_gruppo,
-           gruppo, ruolo, testo, anchor,
-           odg_id.posizione AS odg_pos
-         FROM parlamento_interventi
-         WHERE seduta_id = $sed
-         ORDER BY posizione ASC
-         START $offset LIMIT $pageSize;`,
-        { sed: sedId, offset, pageSize },
+      const { data, total } = await loadInterventiPage(
+        sedId,
+        offset,
+        pageSize,
+        sedutaRow.n ?? null,
       )
-
-      // Pull all refs that belong to the page's interventi in one
-      // batched query, then group them by intervento id. Done this way
-      // (vs. an in-SELECT join) because SurrealDB SCHEMALESS joins via
-      // FETCH inflate the row size and require defensive null-checks
-      // throughout the response shape; this is simpler and equivalent.
-      const interventoIds = (rows ?? []).map((r) => r.id).filter(Boolean)
-      const refsByIntervento = new Map<string, PublicRiferimento[]>()
-      if (interventoIds.length > 0) {
-        const refRows = await runQuery<RiferimentoRow[]>(
-          `SELECT intervento, tipo, anno, numero, articolo, urn, url,
-                  resolve_status, start, end_offset, raw
-           FROM parlamento_riferimenti
-           WHERE intervento IN $ids
-           ORDER BY start ASC;`,
-          { ids: interventoIds },
-        )
-        for (const r of refRows ?? []) {
-          const key = String(r.intervento)
-          if (!refsByIntervento.has(key)) refsByIntervento.set(key, [])
-          refsByIntervento.get(key)!.push({
-            tipo: r.tipo,
-            anno: r.anno,
-            numero: r.numero,
-            articolo: r.articolo,
-            urn: r.urn,
-            url: r.url,
-            resolve_status: r.resolve_status,
-            start: r.start,
-            end_offset: r.end_offset,
-            raw: r.raw,
-          })
-        }
-      }
-
-      // Prefer the precomputed interventi_n on the seduta row over a live
-      // count: it is written by the body-pass ingest, so it is current within
-      // a day and saves a second index walk per request. Fall back to the
-      // count only if the field is *missing* (older sedute pre-dating the
-      // counter). A precomputed `0` is a legitimate value (empty seduta) and
-      // must not retrigger the fallback.
-      let total: number
-      if (sedutaRow.n == null) {
-        const totalRows = await runQuery<Array<{ n: number }>>(
-          `SELECT count() AS n FROM parlamento_interventi
-           WHERE seduta_id = $sed GROUP ALL;`,
-          { sed: sedId },
-        )
-        total = totalRows?.[0]?.n ?? 0
-      } else {
-        total = sedutaRow.n
-      }
-
-      const data = (rows ?? []).map((r) => {
-        const { id, ...publicFields } = r
-        return {
-          ...publicFields,
-          riferimenti: refsByIntervento.get(String(id)) ?? [],
-        }
-      })
 
       // A seduta's interventi are static once the body pass has run.
       setPublicCache(res, IMMUTABLE_MAXAGE)
@@ -545,6 +474,350 @@ router.get(
         pageSize,
         total,
       })
+    } catch (err) {
+      next(err)
+    }
+  },
+)
+
+// ---- shared seduta loaders ---------------------------------------------------
+//
+// The plenary and committee readers render the same thing -- an agenda, a
+// speaker roster, and a paginated transcript with inline references -- and
+// differ only in how the sitting is addressed (chamber+leg+numero vs a
+// document scope). So the addressing lives in the handlers and the loading
+// lives here, rather than in two copies that drift.
+
+interface OratoreSummary {
+  nome: string
+  id_persona: number | null
+  gruppo: string | null
+  ruolo: string | null
+  interventi: number
+}
+
+interface OdgEntry {
+  posizione: number
+  titolo: string
+  anchor: string
+}
+
+async function loadOdgAndOratori(
+  sedId: unknown,
+): Promise<{ odg: OdgEntry[]; oratori: OratoreSummary[] }> {
+  const [odgRows, oratoriRows] = await Promise.all([
+    runQuery<OdgEntry[]>(
+      `SELECT posizione, titolo, anchor
+       FROM parlamento_odg
+       WHERE seduta_id = $sed
+       ORDER BY posizione ASC;`,
+      { sed: sedId },
+    ),
+    runQuery<
+      Array<{
+        oratore_nome: string
+        id_persona: number | null
+        mandato_gruppo: string | null
+        transcript_gruppo: string | null
+        ruolo: string | null
+        n: number
+      }>
+    >(
+      // Speakers are grouped by their resolved mandato (chamber x leg x
+      // id_persona). Camera transcripts don't carry the group inline so
+      // `gruppo` on interventi is null for those rows; the authoritative
+      // current-leg group is `mandato_id.gruppo_attuale`, populated by the
+      // deputati profile-scrape pass. Senato transcripts include the group
+      // inline (e.g. "GARAVAGLIA (LSP-PSd'Az).") so `gruppo` is set there and
+      // takes precedence on display.
+      //
+      // Committee sittings add a third case: speakers who are not
+      // parliamentarians at all (auditees, consultants, officials). They have
+      // no mandato, so id_persona and mandato_gruppo are both null and the
+      // row is carried entirely by oratore_nome and ruolo.
+      `SELECT oratore_nome,
+              mandato_id.id_persona AS id_persona,
+              mandato_id.gruppo_attuale AS mandato_gruppo,
+              gruppo AS transcript_gruppo,
+              ruolo,
+              count() AS n
+       FROM parlamento_interventi
+       WHERE seduta_id = $sed AND oratore_nome IS NOT NONE
+       GROUP BY oratore_nome, mandato_id.id_persona, mandato_id.gruppo_attuale, gruppo, ruolo;`,
+      { sed: sedId },
+    ),
+  ])
+
+  const oratori = (oratoriRows ?? [])
+    .slice()
+    .sort((a, b) => b.n - a.n)
+    .map((r) => ({
+      nome: r.oratore_nome,
+      id_persona: r.id_persona ?? null,
+      gruppo: r.transcript_gruppo ?? r.mandato_gruppo ?? null,
+      ruolo: r.ruolo,
+      interventi: r.n,
+    }))
+
+  return { odg: odgRows ?? [], oratori }
+}
+
+async function loadInterventiPage(
+  sedId: unknown,
+  offset: number,
+  pageSize: number,
+  precomputedTotal: number | null,
+): Promise<{ data: unknown[]; total: number }> {
+  const rows = await runQuery<InterventoRow[]>(
+    `SELECT
+       id,
+       posizione, oratore_nome,
+       mandato_id.id_persona AS oratore_id_persona,
+       mandato_id.chamber AS oratore_chamber,
+       mandato_id.gruppo_attuale AS oratore_mandato_gruppo,
+       gruppo, ruolo, testo, anchor,
+       odg_id.posizione AS odg_pos
+     FROM parlamento_interventi
+     WHERE seduta_id = $sed
+     ORDER BY posizione ASC
+     START $offset LIMIT $pageSize;`,
+    { sed: sedId, offset, pageSize },
+  )
+
+  // Pull all refs belonging to this page's interventi in one batched query,
+  // then group by intervento id. Done this way (vs. an in-SELECT join)
+  // because SurrealDB SCHEMALESS joins via FETCH inflate the row size and
+  // require defensive null-checks throughout the response shape.
+  const interventoIds = (rows ?? []).map((r) => r.id).filter(Boolean)
+  const refsByIntervento = new Map<string, PublicRiferimento[]>()
+  if (interventoIds.length > 0) {
+    const refRows = await runQuery<RiferimentoRow[]>(
+      `SELECT intervento, tipo, anno, numero, articolo, urn, url,
+              resolve_status, start, end_offset, raw
+       FROM parlamento_riferimenti
+       WHERE intervento IN $ids
+       ORDER BY start ASC;`,
+      { ids: interventoIds },
+    )
+    for (const r of refRows ?? []) {
+      const key = String(r.intervento)
+      if (!refsByIntervento.has(key)) refsByIntervento.set(key, [])
+      refsByIntervento.get(key)!.push({
+        tipo: r.tipo,
+        anno: r.anno,
+        numero: r.numero,
+        articolo: r.articolo,
+        urn: r.urn,
+        url: r.url,
+        resolve_status: r.resolve_status,
+        start: r.start,
+        end_offset: r.end_offset,
+        raw: r.raw,
+      })
+    }
+  }
+
+  // Prefer the precomputed interventi_n written by the body pass over a live
+  // count. A precomputed 0 is a legitimate value (an empty sitting) and must
+  // not retrigger the fallback, so the test is on null, not falsiness.
+  let total: number
+  if (precomputedTotal == null) {
+    const totalRows = await runQuery<Array<{ n: number }>>(
+      `SELECT count() AS n FROM parlamento_interventi WHERE seduta_id = $sed GROUP ALL;`,
+      { sed: sedId },
+    )
+    total = totalRows?.[0]?.n ?? 0
+  } else {
+    total = precomputedTotal
+  }
+
+  const data = (rows ?? []).map((r) => {
+    const { id, ...publicFields } = r
+    return { ...publicFields, riferimenti: refsByIntervento.get(String(id)) ?? [] }
+  })
+
+  return { data, total }
+}
+
+// ---- /commissioni ------------------------------------------------------------
+//
+//   GET /commissioni?chamber=&leg=                 -> committee roster
+//   GET /commissioni/:slug/sedute?page=            -> one committee's sittings
+//   GET /commissioni/seduta/:scope                 -> sitting + agenda + speakers
+//   GET /commissioni/seduta/:scope/interventi      -> transcript (paginated)
+//
+// Committee sittings are addressed by their document scope (the record id
+// suffix, e.g. `cc-19-03-indag-c03-commercio-6`) rather than by numero,
+// because committee resoconti are numbered per-committee and a numero is
+// therefore not unique within a chamber and legislature.
+
+/** Committee scopes are generated by the ingest; accept only that shape. */
+function parseScope(raw: unknown): string | null {
+  if (typeof raw !== 'string') return null
+  const v = raw.trim()
+  if (!v || v.length > 120) return null
+  return /^[a-z0-9-]+$/i.test(v) ? v : null
+}
+
+const COMMISSIONE_SEDUTA_FIELDS = `
+  chamber, legislatura, numero, data, titolo,
+  source_url, html_url, interventi_n, odg_n, body_status,
+  organo, organo_cod, organo_nome, organo_slug,
+  tipo_resoconto, tipologia, sottotipologia`
+
+router.get('/commissioni', async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    const chamberFilter = parseChamber(req.query.chamber)
+    const legFilter = parseLegParam(req.query.leg)
+
+    const where: string[] = ['organo = "commissione"']
+    const bindings: Record<string, unknown> = {}
+    if (chamberFilter) {
+      where.push('chamber = $chamber')
+      bindings.chamber = chamberFilter
+    }
+    if (legFilter !== null) {
+      where.push('legislatura = $leg')
+      bindings.leg = legFilter
+    }
+
+    const rows = await runQuery<
+      Array<{
+        organo_slug: string
+        organo_cod: string | null
+        organo_nome: string | null
+        chamber: string
+        tipo_resoconto: string | null
+        n: number
+        prima: string | null
+        ultima: string | null
+        interventi: number | null
+      }>
+    >(
+      `SELECT organo_slug, organo_cod, organo_nome, chamber, tipo_resoconto,
+              count() AS n,
+              time::min(data) AS prima,
+              time::max(data) AS ultima,
+              math::sum(interventi_n) AS interventi
+       FROM parlamento_sedute
+       WHERE ${where.join(' AND ')}
+       GROUP BY organo_slug, organo_cod, organo_nome, chamber, tipo_resoconto;`,
+      bindings,
+    )
+
+    const data = (rows ?? [])
+      .slice()
+      .sort((a, b) => b.n - a.n || (a.organo_nome ?? '').localeCompare(b.organo_nome ?? ''))
+
+    setPublicCache(res, LISTING_MAXAGE)
+    res.json({ data, total: data.length })
+  } catch (err) {
+    next(err)
+  }
+})
+
+router.get(
+  '/commissioni/:slug/sedute',
+  async (req: Request, res: Response, next: NextFunction) => {
+    try {
+      const slug = parseScope(req.params.slug)
+      if (!slug) return res.status(400).json({ error: 'invalid commissione slug' })
+      const page = clampInt(req.query.page, 1, 1, 9999)
+      const pageSize = clampInt(req.query.pageSize, 30, 1, 100)
+      const offset = (page - 1) * pageSize
+      const sort = req.query.sort === 'oldest' ? 'ASC' : 'DESC'
+      const legFilter = parseLegParam(req.query.leg)
+
+      const where = ['organo = "commissione"', 'organo_slug = $slug']
+      const bindings: Record<string, unknown> = { slug }
+      if (legFilter !== null) {
+        where.push('legislatura = $leg')
+        bindings.leg = legFilter
+      }
+      const whereSql = `WHERE ${where.join(' AND ')}`
+
+      const [rows, totalRows] = await Promise.all([
+        runQuery<Array<Record<string, unknown>>>(
+          `SELECT type::string(id) AS id, ${COMMISSIONE_SEDUTA_FIELDS}
+           FROM parlamento_sedute
+           ${whereSql}
+           ORDER BY data ${sort}, numero ${sort}
+           START $offset LIMIT $pageSize;`,
+          { ...bindings, offset, pageSize },
+        ),
+        runQuery<Array<{ n: number }>>(
+          `SELECT count() AS n FROM parlamento_sedute ${whereSql} GROUP ALL;`,
+          bindings,
+        ),
+      ])
+
+      const total = totalRows?.[0]?.n ?? 0
+      setPublicCache(res, LISTING_MAXAGE)
+      res.json({
+        data: rows ?? [],
+        page,
+        pageSize,
+        total,
+        has_more: offset + (rows?.length ?? 0) < total,
+      })
+    } catch (err) {
+      next(err)
+    }
+  },
+)
+
+router.get(
+  '/commissioni/seduta/:scope',
+  async (req: Request, res: Response, next: NextFunction) => {
+    try {
+      const scope = parseScope(req.params.scope)
+      if (!scope) return res.status(400).json({ error: 'invalid seduta scope' })
+
+      const rows = await runQuery<Array<Record<string, unknown> & { rawId: unknown }>>(
+        `SELECT id AS rawId, type::string(id) AS id, ${COMMISSIONE_SEDUTA_FIELDS}
+         FROM type::thing("parlamento_sedute", $scope);`,
+        { scope },
+      )
+      const row = rows?.[0]
+      if (!row || row.organo !== 'commissione') {
+        return res.status(404).json({ error: 'seduta not found' })
+      }
+      const { rawId: sedId, ...seduta } = row
+
+      const { odg, oratori } = await loadOdgAndOratori(sedId)
+
+      setPublicCache(res, IMMUTABLE_MAXAGE)
+      res.json({ seduta, odg, oratori, source: SOURCE_URL })
+    } catch (err) {
+      next(err)
+    }
+  },
+)
+
+router.get(
+  '/commissioni/seduta/:scope/interventi',
+  async (req: Request, res: Response, next: NextFunction) => {
+    try {
+      const scope = parseScope(req.params.scope)
+      if (!scope) return res.status(400).json({ error: 'invalid seduta scope' })
+      const page = clampInt(req.query.page, 1, 1, 9999)
+      const pageSize = clampInt(req.query.pageSize, 200, 1, 5000)
+      const offset = (page - 1) * pageSize
+
+      const rows = await runQuery<Array<{ id: unknown; n: number | null; organo: string | null }>>(
+        `SELECT id, interventi_n AS n, organo
+         FROM type::thing("parlamento_sedute", $scope);`,
+        { scope },
+      )
+      const row = rows?.[0]
+      if (!row || row.organo !== 'commissione') {
+        return res.status(404).json({ error: 'seduta not found' })
+      }
+
+      const { data, total } = await loadInterventiPage(row.id, offset, pageSize, row.n ?? null)
+
+      setPublicCache(res, IMMUTABLE_MAXAGE)
+      res.json({ data, page, pageSize, total })
     } catch (err) {
       next(err)
     }
@@ -570,6 +843,23 @@ interface SearchHit {
   data: string
   odg_titolo: string | null
   score: number
+  /** 'assemblea' | 'commissione'. */
+  organo: string | null
+  /**
+   * 'stenografico' | 'sommario'. The client MUST label a 'sommario' hit as a
+   * summary: Senato committee documents paraphrase speakers in the third
+   * person, so rendering one as a quotation would attribute words to someone
+   * who did not say them.
+   */
+  tipo_resoconto: string | null
+  organo_nome: string | null
+  organo_slug: string | null
+  /**
+   * The sitting's record id as a string. Committee sittings are addressed by
+   * document scope rather than by numero, so a committee hit cannot be linked
+   * from (chamber, legislatura, numero) the way a plenary one can.
+   */
+  seduta_id: string | null
 }
 
 // Shape of a Meilisearch `parlamento_interventi` document as returned by a
@@ -588,6 +878,11 @@ interface MeiliInterventoHit {
   seduta_numero?: number
   seduta_data?: number
   odg_titolo?: string | null
+  organo?: string | null
+  tipo_resoconto?: string | null
+  organo_nome?: string | null
+  organo_slug?: string | null
+  seduta?: string | null
   _formatted?: { testo?: string }
   _rankingScore?: number
 }
@@ -616,6 +911,11 @@ function meiliHitToSearchHit(h: MeiliInterventoHit): SearchHit {
         : '',
     odg_titolo: h.odg_titolo ?? null,
     score: typeof h._rankingScore === 'number' ? h._rankingScore : 0,
+    organo: h.organo ?? 'assemblea',
+    tipo_resoconto: h.tipo_resoconto ?? 'stenografico',
+    organo_nome: h.organo_nome ?? null,
+    organo_slug: h.organo_slug ?? null,
+    seduta_id: h.seduta ?? null,
   }
 }
 
@@ -652,6 +952,7 @@ router.get('/search', async (req: Request, res: Response, next: NextFunction) =>
       return res.json({ data: [], page: 1, pageSize: 0, total: 0, q })
     }
     const chamberFilter = parseChamber(req.query.chamber)
+    const organo = parseOrgano(req.query.organo)
     const page = clampInt(req.query.page, 1, 1, 100)
     const pageSize = clampInt(req.query.pageSize, 20, 1, 50)
     const offset = (page - 1) * pageSize
@@ -720,6 +1021,12 @@ router.get('/search', async (req: Request, res: Response, next: NextFunction) =>
       if (chamberFilter) {
         refWhere.push('chamber = $chamber')
       }
+      if (organo) {
+        // Denormalised on parlamento_riferimenti, so this stays a plain
+        // column predicate rather than a seduta link traversal.
+        refWhere.push('organo = $organo')
+        bindings.organo = organo
+      }
       rows =
         (await runQuery<SearchHit[]>(
           `SELECT
@@ -736,6 +1043,11 @@ router.get('/search', async (req: Request, res: Response, next: NextFunction) =>
              seduta.legislatura AS legislatura,
              seduta.numero AS numero,
              seduta.data AS data,
+             seduta.organo AS organo,
+             seduta.tipo_resoconto AS tipo_resoconto,
+             seduta.organo_nome AS organo_nome,
+             seduta.organo_slug AS organo_slug,
+             type::string(seduta) AS seduta_id,
              intervento.odg_id.titolo AS odg_titolo
            FROM parlamento_riferimenti
            WHERE ${refWhere.join(' AND ')}
@@ -747,6 +1059,17 @@ router.get('/search', async (req: Request, res: Response, next: NextFunction) =>
       // q-only or q+cita path.
       const baseWhere: string[] = []
       if (chamberFilter) baseWhere.push('seduta_id.chamber = $chamber')
+      if (organo === ORGANO_ASSEMBLEA) {
+        // Same reasoning as the Meili filter: rows written before the organo
+        // backfill are all plenary. The backfill makes this branch redundant,
+        // but it costs nothing and removes an ordering dependency between the
+        // deploy and the migration.
+        baseWhere.push('(seduta_id.organo = $organo OR seduta_id.organo IS NONE)')
+        bindings.organo = organo
+      } else if (organo) {
+        baseWhere.push('seduta_id.organo = $organo')
+        bindings.organo = organo
+      }
       if (cita) {
         baseWhere.push(
           `id IN (SELECT VALUE intervento FROM parlamento_riferimenti WHERE ${citaWhere.join(' AND ')})`,
@@ -774,6 +1097,11 @@ router.get('/search', async (req: Request, res: Response, next: NextFunction) =>
                seduta_id.legislatura AS legislatura,
                seduta_id.numero AS numero,
                seduta_id.data AS data,
+               seduta_id.organo AS organo,
+               seduta_id.tipo_resoconto AS tipo_resoconto,
+               seduta_id.organo_nome AS organo_nome,
+               seduta_id.organo_slug AS organo_slug,
+               type::string(seduta_id) AS seduta_id,
                odg_id.titolo AS odg_titolo
              FROM parlamento_interventi
              WHERE ${subWhere.join(' AND ')}
@@ -791,6 +1119,21 @@ router.get('/search', async (req: Request, res: Response, next: NextFunction) =>
         try {
           const filter: string[] = []
           if (chamberFilter) filter.push(`chamber = ${JSON.stringify(chamberFilter)}`)
+          if (organo === ORGANO_ASSEMBLEA) {
+            // Documents indexed before committee support existed carry no
+            // `organo` field at all, and Meilisearch treats a missing field as
+            // non-matching -- so an exact `organo = "assemblea"` filter scores
+            // zero against an index that has not been rebuilt yet. Every one of
+            // those legacy documents IS a plenary intervention (committee data
+            // did not exist when they were written), so treating "absent" as
+            // "assemblea" is exact, not a guess. It also means search keeps
+            // working in the window between deploying this and re-running
+            // scripts/meili-sync.ts, and converges automatically as sedute are
+            // re-synced.
+            filter.push(`(organo = "assemblea" OR organo NOT EXISTS)`)
+          } else if (organo) {
+            filter.push(`organo = ${JSON.stringify(organo)}`)
+          }
           const result = await searchInterventi<MeiliInterventoHit>({
             q,
             filter: filter.length ? filter.join(' AND ') : undefined,
@@ -1059,7 +1402,7 @@ router.get('/legislature/:n', async (req: Request, res: Response, next: NextFunc
            time::max(data) AS data_fine,
            count() AS n
          FROM parlamento_sedute
-         WHERE legislatura = $leg AND chamber = "camera"
+         WHERE organo = "assemblea" AND legislatura = $leg AND chamber = "camera"
          GROUP ALL;`,
         { leg },
       ),
@@ -1069,7 +1412,7 @@ router.get('/legislature/:n', async (req: Request, res: Response, next: NextFunc
            time::max(data) AS data_fine,
            count() AS n
          FROM parlamento_sedute
-         WHERE legislatura = $leg AND chamber = "senato"
+         WHERE organo = "assemblea" AND legislatura = $leg AND chamber = "senato"
          GROUP ALL;`,
         { leg },
       ),
@@ -1587,6 +1930,11 @@ router.get('/odg/search', async (req: Request, res: Response, next: NextFunction
     const where: string[] = ['titolo_lower CONTAINS $q']
     const bindings: Record<string, unknown> = { q: q.toLowerCase() }
 
+    const organo = parseOrgano(req.query.organo)
+    if (organo) {
+      where.push('organo = $organo')
+      bindings.organo = organo
+    }
     if (legFilter !== null) {
       where.push('legislatura = $leg')
       bindings.leg = legFilter
@@ -1600,8 +1948,16 @@ router.get('/odg/search', async (req: Request, res: Response, next: NextFunction
     // idx_seduta_status, and the resulting id list is tiny (see the note
     // above the handler), so binding it as an IN check is cheaper than any
     // per-row link dereference would be.
+    // Scoped to the same organo as the search itself. Unscoped, this list
+    // would also carry every committee sitting still queued for its body pass
+    // -- thousands of ids on a fresh corpus -- and they would be bound into
+    // the NOT IN below for no purpose, since rows from the other organo are
+    // already excluded by the filter above.
     const notOk = await runQuery<Array<{ id: unknown }>>(
-      `SELECT id FROM parlamento_sedute WHERE body_status != "ok";`,
+      organo
+        ? `SELECT id FROM parlamento_sedute WHERE body_status != "ok" AND organo = $organo;`
+        : `SELECT id FROM parlamento_sedute WHERE body_status != "ok";`,
+      organo ? { organo } : {},
     )
     const excluded = (notOk ?? []).map((r) => r.id).filter(Boolean)
     if (excluded.length > 0) {

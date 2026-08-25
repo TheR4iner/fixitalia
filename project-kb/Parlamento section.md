@@ -1,5 +1,10 @@
 # Parlamento section
 
+> **Committee transcripts** (audizioni, indagini conoscitive) are a separate
+> but tightly coupled feature: they share `parlamento_sedute` via an `organo`
+> discriminator, which means `(chamber, legislatura, numero)` is no longer
+> unique. See [[Parlamento commissioni]] before touching any seduta query.
+
 ## Overview
 
 Reader-style section that surfaces the daily transcripts (resoconti

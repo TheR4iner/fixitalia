@@ -1,3 +1,5 @@
+import { existsSync } from 'node:fs'
+
 import { chromium, type Browser, type BrowserContext, type Page } from 'playwright'
 
 import { senatoThrottle } from './senatoThrottle.ts'
@@ -41,13 +43,34 @@ export interface SenatoBrowser {
   close: () => Promise<void>
 }
 
-const CHROMIUM_PATH = process.env.CHROMIUM_PATH ?? '/usr/bin/chromium'
+// Chromium resolution, in priority order:
+//   1. CHROMIUM_PATH -- an explicit operator override.
+//   2. /usr/bin/chromium -- the distro package, which is what the deploy
+//      image ships and what this used to hardcode.
+//   3. Playwright's own bundled build -- reached by leaving executablePath
+//      undefined so Playwright resolves it from its browser cache.
+//
+// Step 3 is the fix for a real outage mode: hardcoding the distro path made
+// every Senato ingest die at launch on any machine without that package, even
+// though `npx playwright install chromium` had already put a perfectly good
+// binary in ~/.cache/ms-playwright. The failure surfaced as "failed to launch
+// Playwright browser", which reads like a WAF problem and is not.
+const SYSTEM_CHROMIUM = '/usr/bin/chromium'
+
+function resolveChromiumPath(): string | undefined {
+  const override = process.env.CHROMIUM_PATH
+  if (override) return override
+  if (existsSync(SYSTEM_CHROMIUM)) return SYSTEM_CHROMIUM
+  return undefined
+}
 const WARMUP_URL =
   'https://www.senato.it/lavori/assemblea/resoconti-elenco-cronologico?year=2024'
 
 export async function openSenatoBrowser(): Promise<SenatoBrowser> {
+  const executablePath = resolveChromiumPath()
   const browser = await chromium.launch({
-    executablePath: CHROMIUM_PATH,
+    // undefined => Playwright falls back to its bundled Chromium.
+    executablePath,
     headless: true,
     args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage'],
   })

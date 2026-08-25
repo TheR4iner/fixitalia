@@ -25,6 +25,13 @@ const LeggePage = lazy(() => import('@/pages/parlamento/LeggePage'))
 const LegislaturePage = lazy(() => import('@/pages/parlamento/LegislaturePage'))
 const TransfughiPage = lazy(() => import('@/pages/parlamento/TransfughiPage'))
 const OdgSearchPage = lazy(() => import('@/pages/parlamento/OdgSearchPage'))
+const CommissioniPage = lazy(() => import('@/pages/parlamento/CommissioniPage'))
+const CommissioneSedutePage = lazy(
+  () => import('@/pages/parlamento/CommissioneSedutePage'),
+)
+const CommissioneSedutaPage = lazy(
+  () => import('@/pages/parlamento/CommissioneSedutaPage'),
+)
 const LeTueTassePage = lazy(() => import('@/pages/LeTueTassePage'))
 const ContattiPage = lazy(() => import('@/pages/ContattiPage'))
 const FontiPage = lazy(() => import('@/pages/FontiPage'))
@@ -76,6 +83,20 @@ export default function App() {
             <Route path="/parlamento/legislature/:n" element={<LegislaturePage />} />
             <Route path="/parlamento/transfughi" element={<TransfughiPage />} />
             <Route path="/parlamento/odg/cerca" element={<OdgSearchPage />} />
+            {/* Committee routes. The seduta route is declared BEFORE the
+                per-committee one so "/commissioni/seduta/xyz" is not captured
+                by "/commissioni/:slug" -- react-router ranks static segments
+                above dynamic ones, but declaring it first keeps the intent
+                obvious to the next reader. */}
+            <Route
+              path="/parlamento/commissioni/seduta/:scope"
+              element={<CommissioneSedutaPage />}
+            />
+            <Route
+              path="/parlamento/commissioni/:slug"
+              element={<CommissioneSedutePage />}
+            />
+            <Route path="/parlamento/commissioni" element={<CommissioniPage />} />
             <Route path="/le-tue-tasse" element={<LeTueTassePage />} />
             <Route path="/contatti" element={<ContattiPage />} />
             <Route path={t.fonti.route} element={<FontiPage />} />

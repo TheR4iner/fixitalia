@@ -18,6 +18,8 @@ import { ingestSpesaPubblica } from '../lib/ingest/spesaPubblica.ts'
 import { ingestFondiEuropei } from '../lib/ingest/fondiEuropei.ts'
 import { ingestAppalti } from '../lib/ingest/appalti.ts'
 import { ingestParlamento, type Chamber } from '../lib/ingest/parlamento/index.ts'
+import { ingestCommissioni } from '../lib/ingest/parlamento/commissioni.ts'
+import { CAMERA_COMMISSIONI_LEGS } from '../lib/ingest/parlamento/cameraCommissioniIndex.ts'
 import { SenatoBlockError } from '../lib/ingest/parlamento/senatoBrowser.ts'
 import { ingestCameraDeputati } from '../lib/ingest/parlamento/cameraDeputatiBulk.ts'
 import { CURRENT_LEGISLATURE } from '../lib/ingest/parlamento/constants.ts'
@@ -152,6 +154,36 @@ const SUBCOMMANDS: Record<string, Handler> = {
       console.log(JSON.stringify(results, null, 2))
     }
   },
+  'parlamento-commissioni': async (rest: string[]) => {
+    await runSchema()
+    const flags = parseCommissioniArgs(rest)
+    // Legislature coverage differs per chamber and is bounded upstream, not
+    // by us: Camera's committee transcript service answers only for legs 17
+    // to 19, while Senato's sommari go back much further. Running the union
+    // and letting each chamber skip what it cannot serve keeps one command
+    // usable for both.
+    const legs = flags.allLegislatures
+      ? legislatureRange(flags.chamber)
+      : [flags.legislatura]
+    const all = []
+    for (const leg of legs) {
+      if (legs.length > 1) {
+        console.log(`\n[commissioni] ======= legislatura ${leg} =======`)
+      }
+      const results = await ingestCommissioni({
+        chamber: flags.chamber,
+        legislatura: leg,
+        limit: flags.limit,
+        refresh: flags.refresh,
+        skipIndex: flags.skipIndex,
+        indexOnly: flags.indexOnly,
+        onlyCod: flags.onlyCod,
+        months: flags.months,
+      })
+      all.push(...results)
+    }
+    console.log(JSON.stringify(all, null, 2))
+  },
   'parlamento-refs': async (rest: string[]) => {
     await runSchema()
     const flags = parseRefsArgs(rest)
@@ -180,6 +212,109 @@ const SUBCOMMANDS: Record<string, Handler> = {
     const result = await ingestCameraDeputati(flags)
     console.log(JSON.stringify(result, null, 2))
   },
+}
+
+interface CommissioniFlags {
+  chamber: Chamber | 'both'
+  legislatura: number
+  allLegislatures: boolean
+  limit: number | undefined
+  refresh: boolean
+  skipIndex: boolean
+  indexOnly: boolean
+  onlyCod: string[] | undefined
+  months: string[] | undefined
+}
+
+/**
+ * Legislatures worth attempting for a chamber.
+ *
+ * Camera's committee service is a hard, upstream-imposed window (legs 17-19);
+ * asking it for leg 13 returns a stub, not data. Senato's sommari archive
+ * reaches back much further, so it gets the full range and each individual
+ * (committee, year) page simply comes back empty where there is nothing.
+ */
+function legislatureRange(chamber: Chamber | 'both'): number[] {
+  if (chamber === 'camera') return [...CAMERA_COMMISSIONI_LEGS]
+  const senato: number[] = []
+  for (let leg = 13; leg <= CURRENT_LEGISLATURE; leg += 1) senato.push(leg)
+  if (chamber === 'senato') return senato
+  return senato
+}
+
+function parseCommissioniArgs(argv: string[]): CommissioniFlags {
+  const flags: CommissioniFlags = {
+    chamber: 'both',
+    legislatura: CURRENT_LEGISLATURE,
+    allLegislatures: false,
+    limit: undefined,
+    refresh: false,
+    skipIndex: false,
+    indexOnly: false,
+    onlyCod: undefined,
+    months: undefined,
+  }
+  for (let i = 0; i < argv.length; i += 1) {
+    const a = argv[i]
+    const next = argv[i + 1]
+    switch (a) {
+      case '--chamber': {
+        if (next !== 'camera' && next !== 'senato' && next !== 'both') {
+          throw new Error(`--chamber must be camera|senato|both, got ${next}`)
+        }
+        flags.chamber = next
+        i += 1
+        break
+      }
+      case '--legislatura': {
+        const n = Number(next)
+        if (!Number.isFinite(n)) throw new Error(`--legislatura must be a number, got ${next}`)
+        flags.legislatura = n
+        i += 1
+        break
+      }
+      case '--all-legislatures':
+        flags.allLegislatures = true
+        break
+      case '--limit': {
+        const n = Number(next)
+        if (!Number.isFinite(n) || n <= 0) throw new Error(`--limit must be a positive number, got ${next}`)
+        flags.limit = n
+        i += 1
+        break
+      }
+      case '--refresh':
+        flags.refresh = true
+        break
+      case '--skip-index':
+        flags.skipIndex = true
+        break
+      case '--index-only':
+        flags.indexOnly = true
+        break
+      case '--months': {
+        if (!next) throw new Error('--months needs a comma-separated list of YYYYMM values')
+        const months = next.split(',').map((m) => m.trim()).filter(Boolean)
+        for (const m of months) {
+          if (!/^\d{6}$/.test(m)) throw new Error(`--months entries must be YYYYMM, got ${m}`)
+        }
+        flags.months = months
+        i += 1
+        break
+      }
+      case '--only-cod':
+        if (!next) throw new Error('--only-cod needs a comma-separated list of committee codes')
+        flags.onlyCod = next.split(',').map((c) => c.trim()).filter(Boolean)
+        i += 1
+        break
+      default:
+        throw new Error(`unknown flag: ${a}`)
+    }
+  }
+  if (flags.allLegislatures && argv.includes('--legislatura')) {
+    throw new Error('--all-legislatures and --legislatura are mutually exclusive')
+  }
+  return flags
 }
 
 interface DeputatiFlags {
@@ -294,6 +429,16 @@ async function main() {
     console.error(`  --limit N                      cap body-pass count per legislature`)
     console.error(`  --from N --to N                seduta-numero range for the index probe (camera, single-leg only)`)
     console.error(`  --refresh                      re-parse sedute already marked ok`)
+    console.error(`parlamento-commissioni flags:`)
+    console.error(`  --chamber camera|senato|both   (default both)`)
+    console.error(`  --legislatura N                (default ${CURRENT_LEGISLATURE})`)
+    console.error(`  --all-legislatures             camera: legs ${CAMERA_COMMISSIONI_LEGS.join(',')} (upstream coverage); senato: 13..${CURRENT_LEGISLATURE}`)
+    console.error(`  --months YYYYMM[,YYYYMM]       camera only: restrict discovery to these months`)
+    console.error(`  --only-cod 0-21[,0-1]          senato only: restrict to these committee codes`)
+    console.error(`  --index-only                   discover sittings and stop (survey before a backfill)`)
+    console.error(`  --skip-index                   body pass only, over sittings already known`)
+    console.error(`  --limit N                      cap body-pass count per legislature`)
+    console.error(`  --refresh                      re-fetch and re-parse sittings already marked ok`)
     console.error(`parlamento-refs flags:`)
     console.error(`  --chamber camera|senato|both   (default both)`)
     console.error(`  --legislatura N                (default 19)`)

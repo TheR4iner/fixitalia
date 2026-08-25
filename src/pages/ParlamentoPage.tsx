@@ -314,6 +314,12 @@ export default function ParlamentoPage() {
             >
               {t.parlamento.quickNav.odgSearch}
             </Link>
+            <Link
+              to="/parlamento/commissioni"
+              className="inline-flex items-center gap-1.5 text-sm text-muted-foreground hover:text-foreground transition-colors"
+            >
+              {t.parlamento.quickNav.commissioni}
+            </Link>
           </CardContent>
         </Card>
       </div>

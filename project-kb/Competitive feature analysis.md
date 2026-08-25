@@ -53,6 +53,13 @@ cross-chamber schema + a BM25 full-text index) are already built.
 5. **SPARQL-or-nothing for bulk.** Il Sole 24 Ore InfoData (Jan 2023)
    called the portals "not for everyone" and "equally difficult."
 6. **Dated, desktop-only UI.** jQuery-era; 1990s framesets for old legs.
+7. **No searchable committee record.** Neither site lets you ask "who was
+   heard by which committee, and what did they say". Camera publishes
+   committee stenografici only as per-sitting HTML reachable through a
+   month-by-month picker; Senato publishes summaries behind its WAF. Yet this
+   is where non-parliamentarians speak -- agency heads, companies, unions,
+   consultants -- which for a project about public money is a richer seam than
+   floor debate. Addressed as of 2026-08-24; see [[Parlamento commissioni]].
 
 ## Ranked feature roadmap
 
@@ -82,6 +89,25 @@ Ordered by leverage (reuse of existing infra) descending.
    bridge.**
 6. **Alerts / subscriptions** -- notify when a speaker or topic appears.
    Zero institutional equivalent. **Engagement / retention.**
+
+### Update 2026-08-24: committee corpus landed
+
+Gap 7 above and part of gap 4 are now closed. Committee transcripts share the
+plenary schema via an `organo` discriminator, so they inherited the ranked
+search, the persona/mandato model and the reader for free -- roadmap item 1
+gained an `organo` facet rather than needing new infrastructure.
+
+Two consequences worth carrying into the roadmap:
+
+- **A new speaker class.** Committee transcripts name people who hold no
+  mandate (auditees, consultants, officials, with their stated affiliation).
+  Roadmap item 2 assumes speakers resolve to a parliamentarian; a
+  "who gets heard by Parliament, and how often" view is a genuinely new
+  question this data makes answerable, and no institutional site can answer
+  it.
+- **Camera is verbatim, Senato is summary.** Any cross-chamber statistic over
+  committee text would compare two different kinds of document. This
+  constrains roadmap item 4 (analytics) until the Senato PDF phase lands.
 
 ## Key tradeoff
 
