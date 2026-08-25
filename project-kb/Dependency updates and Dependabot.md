@@ -277,10 +277,18 @@ nothing imports is a packaging bug, not a security problem.
 
 ## Open questions
 
-- **`vite` 8 and `vitest` 4 are still pending.** No advisory requires them, so
-  they were deliberately excluded from the security sweep. They are a real
-  major upgrade: `vite` 8 wants `@vitejs/plugin-react` 6, and the frontend and
-  backend should move together so the two test setups do not diverge.
+- **TypeScript is pinned below 6.1 by two peers**, so the 7.x line is not
+  reachable yet. `surrealdb` declares `typescript@^5.0.0||^6.0.0` and
+  `typescript-eslint@8` declares `>=4.8.4 <6.1.0`. Dependabot will keep
+  proposing TypeScript 7 in the dev-dependencies group and it will keep
+  failing `npm ci` with ERESOLVE until both upstreams move. Nothing to do but
+  wait.
+- **ESLint 10 and `eslint-plugin-react-hooks` 7 are held back deliberately**,
+  not for a peer conflict but because their new rules fail on existing code:
+  five `react-hooks/set-state-in-effect`, three `no-useless-assignment`, one
+  `preserve-caught-error`. The `set-state-in-effect` ones need real React
+  refactors, so they are their own piece of work rather than a rider on a
+  dependency bump.
 - **No Claude secret is configured**, and `claude-review.yml` is currently
   `disabled_manually`. Both Claude workflows now skip cleanly instead of
   failing, and both accept either `ANTHROPIC_API_KEY` or
@@ -300,6 +308,39 @@ nothing imports is a packaging bug, not a security problem.
   red when an advisory is published overnight.
 
 ## History
+
+### 2026-08-25 -- dev tooling to Vite 8 and Vitest 4, and what blocked the rest
+
+Dependabot's grouped dev-dependency pull request (#17) failed `npm ci` outright
+with an ERESOLVE, so nothing in it could be evaluated. Cause: it bumped
+TypeScript to 7.0.2, and `surrealdb` peers on `typescript@^5||^6` while
+`typescript-eslint@8` peers on `>=4.8.4 <6.1.0`. TypeScript 7 is simply not
+reachable from this dependency set yet.
+
+It was closed and replaced with a verified upgrade holding TypeScript at 5.9
+and the ESLint 10 family back (see Open questions). Two migrations were
+required by Vite 8, neither of which any changelog reading would have caught
+ahead of running it:
+
+- **`manualChunks` must be a function.** Vite 8 bundles with Rolldown rather
+  than Rollup, and Rolldown rejects the object form with `manualChunks is not
+  a function`. Converted to a predicate over the module id, producing the same
+  two chunks. Rollup then disappears from both trees entirely, which made the
+  pinned `@rollup/rollup-*` `optionalDependencies` in both manifests dead
+  weight, so they were dropped.
+- **`__dirname` in `vite.config.ts`.** Vite 8 warns that the native config
+  loader it is migrating to cannot supply the CommonJS globals. Replaced with
+  `import.meta.dirname`.
+
+Also in this batch, and each verified rather than taken on trust because they
+sit on the auto-merge deny list: `surrealdb` 2.0.8 against the live local
+database (22 populated tables, result shapes unchanged), `playwright` 1.62.1
+driving every call `senatoBrowser.ts` makes on both the old and new version,
+`csv-parse` 7 (published by mistake, no breaking changes; 7.0.2 hardens the
+exact `columns` path the ingest uses), and `linkedom` 0.18.13 (CSSOM change
+not reachable from any consumer here).
+
+
 
 ### 2026-08-24 -- first dependency sweep, and the config that should prevent the next one
 
