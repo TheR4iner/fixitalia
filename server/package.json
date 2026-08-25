@@ -29,17 +29,10 @@
   "devDependencies": {
     "@types/cors": "^2.8.19",
     "@types/express": "^5.0.3",
-    "@types/node": "^24.6.2",
-    "@vitest/coverage-v8": "^3.2.7",
+    "@types/node": "^26.2.0",
+    "@vitest/coverage-v8": "^4.1.11",
     "tsx": "^4.23.12",
     "typescript": "^5.9.3",
-    "vitest": "^3.2.7"
-  },
-  "optionalDependencies": {
-    "@rollup/rollup-darwin-arm64": "*",
-    "@rollup/rollup-darwin-x64": "*",
-    "@rollup/rollup-linux-arm64-gnu": "*",
-    "@rollup/rollup-linux-x64-gnu": "*",
-    "@rollup/rollup-win32-x64-msvc": "*"
+    "vitest": "^4.1.11"
   }
 }

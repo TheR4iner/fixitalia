@@ -277,10 +277,18 @@ nothing imports is a packaging bug, not a security problem.
 
 ## Open questions
 
-- **`vite` 8 and `vitest` 4 are still pending.** No advisory requires them, so
-  they were deliberately excluded from the security sweep. They are a real
-  major upgrade: `vite` 8 wants `@vitejs/plugin-react` 6, and the frontend and
-  backend should move together so the two test setups do not diverge.
+- **TypeScript is pinned below 6.1 by two peers**, so the 7.x line is not
+  reachable yet. `surrealdb` declares `typescript@^5.0.0||^6.0.0` and
+  `typescript-eslint@8` declares `>=4.8.4 <6.1.0`. Dependabot will keep
+  proposing TypeScript 7 in the dev-dependencies group and it will keep
+  failing `npm ci` with ERESOLVE until both upstreams move. Nothing to do but
+  wait.
+- **ESLint 10 and `eslint-plugin-react-hooks` 7 are held back deliberately**,
+  not for a peer conflict but because their new rules fail on existing code:
+  five `react-hooks/set-state-in-effect`, three `no-useless-assignment`, one
+  `preserve-caught-error`. The `set-state-in-effect` ones need real React
+  refactors, so they are their own piece of work rather than a rider on a
+  dependency bump.
 - **No Claude secret is configured**, and `claude-review.yml` is currently
   `disabled_manually`. Both Claude workflows now skip cleanly instead of
   failing, and both accept either `ANTHROPIC_API_KEY` or
@@ -300,6 +308,61 @@ nothing imports is a packaging bug, not a security problem.
   red when an advisory is published overnight.
 
 ## History
+
+### 2026-08-25 -- dev tooling to Vite 8 and Vitest 4, and what blocked the rest
+
+Dependabot's grouped dev-dependency pull request (#17) failed `npm ci` outright
+with an ERESOLVE, so nothing in it could be evaluated. Cause: it bumped
+TypeScript to 7.0.2, and `surrealdb` peers on `typescript@^5||^6` while
+`typescript-eslint@8` peers on `>=4.8.4 <6.1.0`. TypeScript 7 is simply not
+reachable from this dependency set yet.
+
+It was closed and replaced with a verified upgrade holding TypeScript at 5.9
+and the ESLint 10 family back (see Open questions). Two migrations were
+required by Vite 8, neither of which any changelog reading would have caught
+ahead of running it:
+
+- **`manualChunks` must be a function.** Vite 8 bundles with Rolldown rather
+  than Rollup, and Rolldown rejects the object form with `manualChunks is not
+  a function`. Converted to a predicate over the module id, producing the same
+  two chunks. Rollup then disappears from both trees entirely, which made the
+  pinned `@rollup/rollup-*` `optionalDependencies` in both manifests dead
+  weight, so they were dropped.
+- **`__dirname` in `vite.config.ts`.** Vite 8 warns that the native config
+  loader it is migrating to cannot supply the CommonJS globals. Replaced with
+  `import.meta.dirname`.
+
+### 2026-08-25 -- the deny-listed runtime bumps, verified individually
+
+Separate from the dev-toolchain work above, and landed as their own pull
+requests rather than as a group, because `.github/dependabot.yml` excludes
+these packages from the grouped runtime update. Each was verified by something
+other than CI, since being un-vouched-for by CI is precisely why they are on
+the deny list:
+
+- **`surrealdb` 2.0.8** (#19): driven against the live local SurrealDB holding
+  22 populated tables, using the callable `authentication:` form from
+  `server/lib/db.ts`. Connect, signin, bound parameters, multi-statement
+  batches and `SELECT` from a real table all return the shapes
+  `server/lib/query.ts` expects.
+- **`playwright` 1.62.1** (#20): every call `senatoBrowser.ts` makes, in order
+  and with the same options, run against a local throwaway server on **both**
+  1.60.0 (Chromium 148) and 1.62.1 (Chromium 151). Identical behaviour. Says
+  nothing about WAF fingerprinting, which only a live Senato run can answer.
+- **`csv-parse` 7.0.2** (#21): the 7.0.0 major was published by mistake with no
+  breaking changes, per its own changelog. 7.0.2 hardens prototype replacement
+  reachable via `columns`, which is exactly what `appalti.ts:164` and
+  `spesaPubblica.ts:360` pass to `csv-parse/sync`.
+- **`linkedom` 0.18.13** (#22): the one behavioural change is CSSOM-only and no
+  consumer here touches `.style` or `getComputedStyle`.
+
+A trap worth recording from the SurrealDB run: the client's `connect()` accepts
+`authentication:` (callable, re-invoked to refresh an expired token) and
+silently ignores a plain `auth:` object, leaving the connection
+unauthenticated. The symptom is an IAM permission error on a trivial query
+rather than anything pointing at auth.
+
+
 
 ### 2026-08-24 -- first dependency sweep, and the config that should prevent the next one
 
