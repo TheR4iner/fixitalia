@@ -37,9 +37,7 @@
 // one go with predicates inlined.
 
 import type { DeputatoSnapshot } from './cameraDeputatoScraper.ts'
-import { fetchWithRetry } from './parseHelpers.ts'
-
-const SPARQL_ENDPOINT = 'https://dati.senato.it/sparql'
+import { querySparql, sparqlValue, type SparqlResults } from './senatoSparqlClient.ts'
 
 const LEG_ROMAN: Record<number, string> = {
   1: 'I',
@@ -63,42 +61,7 @@ const LEG_ROMAN: Record<number, string> = {
   19: 'XIX',
 }
 
-interface SparqlBinding {
-  type: string
-  value: string
-  datatype?: string
-}
-
-interface SparqlResults {
-  head: { vars: string[] }
-  results: { bindings: Array<Record<string, SparqlBinding>> }
-}
-
-async function querySparql(query: string, timeoutMs = 30_000): Promise<SparqlResults> {
-  // dati.senato.it gates plain Node fetch with HTTP 403. Two quirks to
-  // satisfy its WAF:
-  //   1. Browser-like headers (BROWSER_HEADERS via fetchWithRetry).
-  //   2. Spaces must be `+` (form-urlencoded), NOT `%20` (default
-  //      encodeURIComponent output). The WAF flags `%20` inside
-  //      multi-OPTIONAL queries as suspicious and 403s; URLSearchParams
-  //      uses `+` and passes cleanly. Curl with `--data-urlencode` also
-  //      uses `+`, which is why curl works where naive fetch doesn't.
-  const params = new URLSearchParams()
-  params.set('query', query)
-  params.set('format', 'application/sparql-results+json')
-  const url = `${SPARQL_ENDPOINT}?${params.toString()}`
-  const res = await fetchWithRetry(url, {
-    timeoutMs,
-    attempts: 2,
-    headers: { accept: 'application/sparql-results+json' },
-  })
-  if (!res.ok) throw new Error(`SPARQL HTTP ${res.status}`)
-  return (await res.json()) as SparqlResults
-}
-
-function v(row: Record<string, SparqlBinding>, key: string): string | null {
-  return row[key]?.value ?? null
-}
+const v = sparqlValue
 
 export async function fetchSenatoreViaSparql(
   idPersona: number,

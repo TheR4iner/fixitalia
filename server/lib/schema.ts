@@ -210,6 +210,56 @@ const SCHEMA_STATEMENTS = `
   -- successful pass; the refs ingest re-runs whenever it is stale.
   DEFINE FIELD IF NOT EXISTS refs_status         ON parlamento_sedute TYPE option<string>;
   DEFINE FIELD IF NOT EXISTS refs_parser_version ON parlamento_sedute TYPE option<number>;
+  -- ---------------------------------------------------------------------
+  -- Organo: which body actually sat. 'assemblea' is the plenary corpus that
+  -- predates this field; 'commissione' is a committee sitting.
+  --
+  -- Committee sittings share this table (rather than living in a sibling
+  -- one) because everything downstream of a seduta -- parlamento_odg,
+  -- parlamento_interventi, the refs extractor, the Meilisearch sync, the
+  -- persona/mandato speaker model -- is identical for both. Splitting the
+  -- table would have meant duplicating all of it and, worse, would have left
+  -- committee speeches out of full-text search until each of those pipelines
+  -- was taught about the second table.
+  --
+  -- The cost of sharing is that (chamber, legislatura, numero) is NO LONGER
+  -- unique: committee resoconti are numbered per-committee, so camera/19/1
+  -- names one plenary sitting but also one sitting of every committee. Every
+  -- query that means "a plenary sitting" must therefore say so. See the
+  -- organo = "assemblea" filters in routes/parlamento.ts -- they are load
+  -- bearing, not decoration.
+  DEFINE FIELD IF NOT EXISTS organo         ON parlamento_sedute TYPE option<string>;
+  -- Committee identity, in each chamber's own code space:
+  --   camera -> idCommissione, zero-padded 2 digits ("03", "70")
+  --   senato -> "{tipo}-{cod}" from dati.senato.it/commissione/{tipo}-{cod}
+  DEFINE FIELD IF NOT EXISTS organo_cod     ON parlamento_sedute TYPE option<string>;
+  DEFINE FIELD IF NOT EXISTS organo_nome    ON parlamento_sedute TYPE option<string>;
+  -- Chamber-qualified url-safe key for the committee, e.g. "camera-03". This
+  -- is what the reader routes on, because organo_cod alone collides across
+  -- chambers.
+  DEFINE FIELD IF NOT EXISTS organo_slug    ON parlamento_sedute TYPE option<string>;
+  -- 'stenografico' (verbatim) or 'sommario' (third-person summary). This is a
+  -- content warning as much as metadata: Senato publishes committee work as
+  -- sommari, whose sentences paraphrase the speaker rather than quote them,
+  -- so the reader must not present them as quotations.
+  DEFINE FIELD IF NOT EXISTS tipo_resoconto ON parlamento_sedute TYPE option<string>;
+  -- Source-specific classification of a committee sitting. The two chambers
+  -- populate these differently and the values are NOT comparable across them:
+  --
+  --   camera: tipologia is the sitting kind ('indag' = indagine conoscitiva,
+  --           'audiz2' = audizione, 'altro', or a sede code) and
+  --           sottotipologia names the specific inquiry when there is one
+  --           ('c03_commercio'). Both are literal path segments of the
+  --           upstream URL, so they are stored verbatim rather than
+  --           normalised -- the body pass rebuilds the URL from them.
+  --   senato: tipologia holds the committee's CATEGORY ('Commissioni
+  --           permanenti', 'Giunte', ...) from the LOD graph, because the
+  --           sommari carry no per-sitting kind. sottotipologia is unused.
+  --
+  -- Anything rendering these must therefore branch on chamber. The reader's
+  -- label map only covers the Camera values and falls back to no badge.
+  DEFINE FIELD IF NOT EXISTS tipologia      ON parlamento_sedute TYPE option<string>;
+  DEFINE FIELD IF NOT EXISTS sottotipologia ON parlamento_sedute TYPE option<string>;
   DEFINE FIELD IF NOT EXISTS ingested_at   ON parlamento_sedute TYPE datetime DEFAULT time::now();
   DEFINE INDEX IF NOT EXISTS idx_seduta_data    ON parlamento_sedute FIELDS data;
   DEFINE INDEX IF NOT EXISTS idx_seduta_chamber ON parlamento_sedute FIELDS chamber;
@@ -223,6 +273,16 @@ const SCHEMA_STATEMENTS = `
   -- with a direct hit. The /sedute listing keeps WITH NOINDEX for sort
   -- correctness, so this index does not affect it.
   DEFINE INDEX IF NOT EXISTS idx_seduta_chamber_leg_num ON parlamento_sedute FIELDS chamber, legislatura, numero;
+  -- The listing and calendar endpoints always narrow by organo first (the
+  -- reader shows plenary and committee work in separate views), so this is
+  -- the leading column. (chamber, legislatura) trails it to serve the
+  -- per-leg filters within a view.
+  DEFINE INDEX IF NOT EXISTS idx_seduta_organo ON parlamento_sedute FIELDS organo, chamber, legislatura;
+  -- Serves the committee detail page: every sitting of one committee, newest
+  -- first.
+  DEFINE INDEX IF NOT EXISTS idx_seduta_organo_slug ON parlamento_sedute FIELDS organo_slug, data;
+
+
 
   DEFINE TABLE IF NOT EXISTS parlamento_odg SCHEMALESS;
   DEFINE FIELD IF NOT EXISTS seduta_id  ON parlamento_odg TYPE record<parlamento_sedute>;
@@ -254,6 +314,12 @@ const SCHEMA_STATEMENTS = `
   -- the filters used to do, which measured as noise (2685ms with it vs
   -- 2667ms without). Comparing against a stored lowercase column keeps the
   -- match case-insensitive at the cheaper price.
+  -- organo mirrors the owning seduta's, for the same reason chamber and
+  -- legislatura do: /odg/search filters on it, and resolving it through the
+  -- seduta record link costs a link dereference per row (measured at 2.8s on
+  -- the 213k-row corpus). Without it, committee agenda items would silently
+  -- appear in searches meant for plenary business.
+  DEFINE FIELD IF NOT EXISTS organo ON parlamento_odg TYPE option<string>;
   DEFINE FIELD IF NOT EXISTS titolo_lower ON parlamento_odg TYPE option<string>;
   DEFINE INDEX IF NOT EXISTS idx_odg_seduta ON parlamento_odg FIELDS seduta_id, posizione;
   -- Serves the leg/chamber narrowing on /odg/search. The titolo predicate is a
@@ -262,6 +328,8 @@ const SCHEMA_STATEMENTS = `
   -- legislatures when the filter is set.
   DEFINE INDEX IF NOT EXISTS idx_odg_chamber_leg ON parlamento_odg FIELDS chamber, legislatura;
   DEFINE INDEX IF NOT EXISTS idx_odg_data        ON parlamento_odg FIELDS data;
+  DEFINE INDEX IF NOT EXISTS idx_odg_organo      ON parlamento_odg FIELDS organo, chamber, legislatura;
+
 
   DEFINE TABLE IF NOT EXISTS parlamento_interventi SCHEMALESS;
   DEFINE FIELD IF NOT EXISTS seduta_id    ON parlamento_interventi TYPE record<parlamento_sedute>;
@@ -402,6 +470,11 @@ const SCHEMA_STATEMENTS = `
   -- index, so we pay 6 bytes per row to keep the filter indexable.
   DEFINE FIELD IF NOT EXISTS chamber        ON parlamento_riferimenti TYPE option<string>;
   DEFINE FIELD IF NOT EXISTS legislatura    ON parlamento_riferimenti TYPE option<number>;
+  -- organo denormalised from the seduta for the same reason chamber and
+  -- legislatura are: /search?cita and the most-cited-laws leaderboard filter
+  -- on it, and resolving it through the seduta record link puts a per-row
+  -- link dereference inside the predicate.
+  DEFINE FIELD IF NOT EXISTS organo         ON parlamento_riferimenti TYPE option<string>;
   DEFINE FIELD IF NOT EXISTS tipo           ON parlamento_riferimenti TYPE string;
   DEFINE FIELD IF NOT EXISTS anno           ON parlamento_riferimenti TYPE option<number>;
   DEFINE FIELD IF NOT EXISTS numero         ON parlamento_riferimenti TYPE option<string>;
@@ -422,6 +495,7 @@ const SCHEMA_STATEMENTS = `
   DEFINE INDEX IF NOT EXISTS idx_ref_intervento ON parlamento_riferimenti FIELDS intervento;
   DEFINE INDEX IF NOT EXISTS idx_ref_seduta     ON parlamento_riferimenti FIELDS seduta;
   DEFINE INDEX IF NOT EXISTS idx_ref_lookup     ON parlamento_riferimenti FIELDS tipo, anno, numero;
+  DEFINE INDEX IF NOT EXISTS idx_ref_organo     ON parlamento_riferimenti FIELDS organo;
   DEFINE INDEX IF NOT EXISTS idx_ref_resolve    ON parlamento_riferimenti FIELDS resolve_status;
   -- Composite index for the AS-resolver UPDATE: WHERE tipo=as AND
   -- legislatura=L AND numero=N. Without this, every per-bill resolve
@@ -457,6 +531,37 @@ const SCHEMA_STATEMENTS = `
   DEFINE FIELD IF NOT EXISTS body_run_at      ON parlamento_ingest_state TYPE option<datetime>;
   DEFINE FIELD IF NOT EXISTS updated_at       ON parlamento_ingest_state TYPE datetime DEFAULT time::now();
   DEFINE INDEX IF NOT EXISTS idx_pis_chamber  ON parlamento_ingest_state FIELDS chamber, legislatura UNIQUE;
+
+  -- =====================================================================
+  -- One-shot migrations.
+  --
+  -- runSchema() executes on every boot, so a backfill written as a plain
+  -- UPDATE ... WHERE field IS NONE is NOT free once it has run: the
+  -- predicate still scans the table to find the nothing it now matches.
+  -- Measured on the live corpus, that is 1.66s of every startup for
+  -- parlamento_odg's 213k rows.
+  --
+  -- A sentinel record turns each backfill into an O(1) point lookup after the
+  -- first run, while still converging automatically on a fresh clone or an
+  -- existing deployment with no operator step.
+  -- =====================================================================
+  DEFINE TABLE IF NOT EXISTS parlamento_migrations SCHEMALESS;
+  DEFINE FIELD IF NOT EXISTS applied_at ON parlamento_migrations TYPE datetime DEFAULT time::now();
+
+  -- organo: label every pre-existing sitting and agenda item as plenary. Rows
+  -- written by the committee ingest always set organo explicitly, so anything
+  -- still missing it predates the field.
+  IF (SELECT VALUE id FROM ONLY parlamento_migrations:organo_backfill) IS NONE {
+    UPDATE parlamento_sedute SET organo = "assemblea", tipo_resoconto = "stenografico"
+      WHERE organo IS NONE;
+    UPDATE parlamento_odg SET organo = "assemblea" WHERE organo IS NONE;
+    CREATE parlamento_migrations:organo_backfill SET applied_at = time::now();
+  };
+
+  IF (SELECT VALUE id FROM ONLY parlamento_migrations:organo_backfill_refs) IS NONE {
+    UPDATE parlamento_riferimenti SET organo = "assemblea" WHERE organo IS NONE;
+    CREATE parlamento_migrations:organo_backfill_refs SET applied_at = time::now();
+  };
 `
 
 export async function runSchema(): Promise<void> {

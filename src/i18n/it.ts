@@ -733,6 +733,7 @@ export const t = {
       leggiCitate: 'Leggi più citate nei dibattiti →',
       transfughi: 'Cambi di gruppo parlamentare →',
       odgSearch: 'Cerca negli ordini del giorno →',
+      commissioni: 'Lavori delle commissioni →',
       legislatureOverview: 'Vedi panoramica legislatura →',
       removeLegFilter: '× Rimuovi filtro legislatura',
       legShort: (n: number) => `${n}ª leg.`,
@@ -789,6 +790,43 @@ export const t = {
       videoNotAvailable: 'Video non disponibile per questa seduta.',
       empty:
         'Nessuna trascrizione disponibile per questa seduta. La sessione potrebbe non essere ancora stata pubblicata o presentare problemi di parsing.',
+    },
+    commissioni: {
+      navTitle: 'Commissioni',
+      title: 'Commissioni parlamentari',
+      subtitle:
+        'I lavori delle commissioni: audizioni, indagini conoscitive e sedute in sede referente. È qui che passano le persone convocate dal Parlamento -- dirigenti pubblici, imprese, sindacati, tecnici -- e le loro parole valgono quanto quelle dette in Aula.',
+      // No leading arrow: the link renders an ArrowLeft icon beside it.
+      backLabel: 'Parlamento',
+      backToCommissioni: 'Tutte le commissioni',
+      backToSedute: 'Tutte le sedute della commissione',
+      empty: 'Nessuna commissione importata ancora.',
+      emptySedute: 'Nessuna seduta importata per questa commissione.',
+      seduteCount: 'sedute',
+      interventiCount: 'interventi',
+      periodLabel: 'Periodo',
+      open: 'Apri',
+      // Committee sittings are numbered per-committee, so the number alone
+      // does not identify a sitting the way it does for the Aula.
+      sedutaLabel: 'Resoconto',
+      tipologia: {
+        indag: 'Indagine conoscitiva',
+        audiz2: 'Audizione',
+        audizione: 'Audizione',
+        altro: 'Seduta',
+      },
+      // The single most important label in this section. A Senato committee
+      // "resoconto sommario" paraphrases speakers in the third person; showing
+      // it without saying so would present the secretariat's words as quotes.
+      sommarioBadge: 'Resoconto sommario',
+      sommarioNotice:
+        'Questo è un resoconto sommario: il testo riassume gli interventi in terza persona, redatto dagli uffici del Senato. Non è una trascrizione parola per parola e non va citato come tale.',
+      stenograficoBadge: 'Resoconto stenografico',
+      chamberFilterLegend: 'Filtra per ramo del Parlamento',
+      searchScopeLegend: 'Dove cercare',
+      searchScopeAula: 'Aula',
+      searchScopeCommissioni: 'Commissioni',
+      searchScopeAll: 'Aula e commissioni',
     },
     reader: {
       fontLabel: 'Carattere',
