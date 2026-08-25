@@ -63,6 +63,30 @@ the review workflow leaves must be resolved before a merge is possible. That is
 usually what you want, but it does mean the review bot can block a merge, and
 that resolving its threads is now part of the flow.
 
+### Trap 5: `github.actor` is not the pull request author
+
+Both workflows keyed their Dependabot test on `github.actor`. That is whoever
+caused the specific event, not who opened the pull request, and the two differ
+the moment a human touches a bot's pull request.
+
+Reopening #18 by hand was enough to demonstrate both halves of it in one go:
+the auto-merge job skipped, because the actor was no longer `dependabot[bot]`,
+and the review job *ran*, buying a paid review of a twelve-package lockfile
+diff for exactly the reason the guard was written to prevent. The same happens
+on `ready_for_review`, or any other human-triggered event on a bot's pull
+request.
+
+Both now test `github.event.pull_request.user.login`, which is the author and
+does not change with the event.
+
+That fix opens a gap of its own on `synchronize`, which the review of it
+caught: the author stays `dependabot[bot]` when a **human pushes a commit onto
+a Dependabot branch**, so the branch could carry hand-written code while the
+metadata still describes Dependabot's original bump. The old actor-based check
+blocked that case, for the wrong reason but with the right effect. Auto-merge
+therefore has a third gate: every commit on the branch must be authored by
+`dependabot[bot]`, or the pull request goes to a human.
+
 ### The deny list, and why it is not about semver
 
 `surrealdb`, `playwright`, `linkedom`, `csv-parse` and `express` never

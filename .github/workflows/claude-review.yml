@@ -38,9 +38,15 @@ jobs:
     # excluded for the same reason forks are: GitHub withholds secrets from
     # runs it triggers, so the job could only ever fail. Its pull requests are
     # handled by dependabot-auto-merge.yml instead.
+    #
+    # The test is on the pull request's AUTHOR, not on `github.actor`.
+    # `github.actor` is whoever caused this particular event, so a human
+    # reopening or un-drafting a Dependabot pull request passes an
+    # actor-based check and buys a full paid review of a lockfile diff. That
+    # is not hypothetical: it is what a single `gh pr reopen 18` did.
     if: >-
       github.event.pull_request.head.repo.full_name == github.repository &&
-      github.actor != 'dependabot[bot]' &&
+      github.event.pull_request.user.login != 'dependabot[bot]' &&
       github.event.pull_request.draft == false
     runs-on: ubuntu-latest
     timeout-minutes: 20
