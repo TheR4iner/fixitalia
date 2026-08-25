@@ -96,6 +96,7 @@ with `appalti` or `opere-incompiute` for a working site.
 │   ├── scripts/                 # Ingest CLI and one-off probes
 │   ├── data/                    # Persisted files -- gitignored
 │   └── test/                    # Backend tests
+├── .github/actions/             # Local composite actions (Claude spend gate)
 ├── .github/workflows/           # CI, release, security, Claude review, Dependabot automation
 └── project-kb/                  # Long-lived notes per topic (see below)
 ```
@@ -208,7 +209,7 @@ files here directly; there is no upstream to pick changes up from.
 - **On push/PR** to `main` or `develop`: `ci.yml` runs the frontend job (lint, `tsc --noEmit`, tests, build) and the backend job (type-check, tests), then a `ci-success` gate that fails if either did. `ci.yml` does **not** publish images -- pushing to `main` builds and verifies only.
 - **On `v*` tag push**: `release.yml` publishes the images to `ghcr.io/TheR4iner/fixitalia-{frontend,backend}` -- semver tags (`{major}`, `{major}.{minor}`, `{version}`), a short-SHA tag, and `latest` -- then runs the `deploy` job (syncs the SurrealDB login to the VPS, then SSHes in to pull + restart). Tagging is the only path that publishes images or deploys. Create release tags with `git tag v1.2.3 && git push --tags`.
 - **Weekly (Mondays 09:00 UTC) and on push/PR**: `security.yml` runs `npm audit` and a licence check. Both jobs end in `|| true`, so a green check here means the scan ran, not that it found nothing.
-- **On PR**: `claude-review.yml` runs an automated review. It is skipped for forks and for Dependabot, because GitHub withholds secrets from both, and it is skipped entirely when no Claude secret is configured rather than failing the check. Both Claude workflows accept either `ANTHROPIC_API_KEY` (billed through the API) or `CLAUDE_CODE_OAUTH_TOKEN` from `claude setup-token` (billed against a Claude subscription); set whichever one you want as a repository secret.
+- **On PR**: `claude-review.yml` runs an automated review, on `opened`, `reopened` and `ready_for_review` but deliberately not on `synchronize`. It is skipped for drafts, for forks and for Dependabot, because GitHub withholds secrets from the last two, and it is skipped entirely when no Claude secret is configured rather than failing the check.
 
 ### Dependency updates
 
@@ -248,8 +249,41 @@ pull request's code, and must stay that way.
 the changelogs behind the `needs-review` pile and comments a MERGE / MERGE WITH
 CARE / HOLD verdict on each. It is one scheduled invocation over the whole
 pile, not one per pull request: a model reading a lockfile diff knows less than
-CI does, while a model reading a migration guide knows something CI cannot. It
-needs one of the two secrets above and skips cleanly without either.
+CI does, while a model reading a migration guide knows something CI cannot.
+
+### Claude workflows: authentication and spend
+
+Both Claude workflows accept either secret, and skip cleanly when neither is
+set:
+
+- `ANTHROPIC_API_KEY`, a key from the Claude Console, billed through the API.
+- `CLAUDE_CODE_OAUTH_TOKEN`, from `claude setup-token`, billed against a Claude
+  subscription.
+
+Neither requires the Claude GitHub App to be installed. Both pass
+`github_token: ${{ secrets.GITHUB_TOKEN }}`, which is the documented way to run
+the action without the app; the cost is that comments arrive from
+`github-actions[bot]` rather than from Claude, and `@claude` mentions do not
+work. Delete that one line in a workflow to authenticate as the app instead,
+after installing it.
+
+**Spend is capped inside the workflows, because nothing else caps it.** GitHub
+has no token budget, and a subscription-billed run has no per-repository limit
+on the Anthropic side either. Three mechanisms stand in for one:
+
+- `.github/actions/claude-budget` refuses to start Claude once a workflow has
+  invoked it more than N times in the trailing seven days (20 for review, 3 for
+  triage). It counts *invocations*, by inspecting the `Run Claude` step of past
+  runs, not workflow runs: a run that skipped Claude must not consume budget,
+  or one week over the limit would lock the workflow out forever.
+- `--max-turns` bounds a single invocation (25 for review, 60 for triage), and
+  `timeout-minutes` bounds the job.
+- The review trigger omits `synchronize`, which would otherwise buy a full
+  review on every push to a pull request branch. That is the largest avoidable
+  cost in the whole setup.
+
+Raising a cap is a one-line change in the calling workflow. A blocked run says
+so with a `::warning::` rather than failing.
 
 To trigger a release:
 

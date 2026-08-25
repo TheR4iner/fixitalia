@@ -1,0 +1,111 @@
+name: Claude budget gate
+description: >-
+  Refuses to start Claude when this workflow has already run it too many times
+  in the trailing seven days.
+
+# Why this exists
+#
+# Runs here are paid for out of a personal Claude subscription, and neither
+# GitHub nor Anthropic offers a per-repository spending cap for that. The only
+# levers available inside a workflow are how often Claude starts and how much
+# work each start is allowed to do. This action is the first lever;
+# `--max-turns` in the calling workflow is the second.
+#
+# It counts real invocations, not workflow runs. A run that skipped Claude --
+# because no credential was configured, or because this gate blocked it -- must
+# not consume budget, or a single week over the limit would lock the workflow
+# out permanently. So it looks at the step named by `step-name` in each past
+# run and counts only the ones that actually executed.
+#
+# The calling job must check out the repository before using this action.
+
+inputs:
+  workflow:
+    description: 'Workflow file to count runs of, e.g. claude-review.yml.'
+    required: true
+  max-runs-per-week:
+    description: 'How many Claude invocations this workflow may make in seven days.'
+    required: true
+  step-name:
+    description: 'Name of the step that invokes Claude, as it appears in the run.'
+    required: false
+    default: 'Run Claude'
+  github-token:
+    description: 'Token used to read this repository''s workflow history.'
+    required: true
+
+outputs:
+  within-budget:
+    description: "'true' when Claude may run."
+    value: ${{ steps.count.outputs.within-budget }}
+  used:
+    description: 'Invocations in the trailing seven days, before this one.'
+    value: ${{ steps.count.outputs.used }}
+
+runs:
+  using: composite
+  steps:
+    - id: count
+      shell: bash
+      env:
+        GH_TOKEN: ${{ inputs.github-token }}
+        REPO: ${{ github.repository }}
+        WORKFLOW: ${{ inputs.workflow }}
+        MAX_RUNS: ${{ inputs.max-runs-per-week }}
+        STEP_NAME: ${{ inputs.step-name }}
+      run: |
+        set -euo pipefail
+
+        if [[ ! "$MAX_RUNS" =~ ^[0-9]+$ ]]; then
+          echo "::error::max-runs-per-week must be a number, got: $MAX_RUNS"
+          exit 1
+        fi
+
+        since="$(date -u -d '7 days ago' +%Y-%m-%dT%H:%M:%SZ)"
+
+        # A failed `gh api` still writes the error body to stdout, so the exit
+        # status is checked explicitly and the output discarded on failure.
+        # Letting that body through was a real bug: it reached the arithmetic
+        # below as an operand.
+        #
+        # The most recent 100 runs comfortably covers seven days at any
+        # plausible rate, so created_at is filtered here rather than through
+        # the search-qualifier syntax in the query string.
+        if ! raw_ids="$(gh api \
+              "repos/$REPO/actions/workflows/$WORKFLOW/runs?per_page=100" \
+              --jq ".workflow_runs[] | select(.created_at > \"$since\") | .id" \
+              2>/dev/null)"; then
+          # The usual cause is benign: the workflow has no history yet because
+          # this is its first run. It is warned about rather than passed over
+          # silently, because a mistyped `workflow` input looks identical from
+          # here and would hand out an unlimited budget.
+          echo "::warning::Could not read run history for $WORKFLOW. Treating usage as zero. If $WORKFLOW has run before, check that the input names the right file."
+          raw_ids=''
+        fi
+
+        # Belt and braces: only ever iterate over things that are run ids.
+        run_ids="$(grep -E '^[0-9]+$' <<< "$raw_ids" || true)"
+
+        used=0
+        for id in $run_ids; do
+          if ! n="$(gh api "repos/$REPO/actions/runs/$id/jobs" \
+                --jq "[.jobs[].steps[]?
+                       | select(.name == \"$STEP_NAME\")
+                       | select(.conclusion != \"skipped\")] | length" \
+                2>/dev/null)"; then
+            echo "::warning::Could not read jobs for run $id; not counted."
+            continue
+          fi
+          [[ "$n" =~ ^[0-9]+$ ]] || n=0
+          used=$(( used + n ))
+        done
+
+        echo "used=$used" >> "$GITHUB_OUTPUT"
+
+        if (( used < MAX_RUNS )); then
+          echo 'within-budget=true' >> "$GITHUB_OUTPUT"
+          echo "Claude has run $used/$MAX_RUNS times for $WORKFLOW in the last seven days."
+        else
+          echo 'within-budget=false' >> "$GITHUB_OUTPUT"
+          echo "::warning::Weekly budget reached for $WORKFLOW ($used/$MAX_RUNS invocations since $since). Skipping Claude. Raise max-runs-per-week in the workflow, or wait for the window to roll forward."
+        fi

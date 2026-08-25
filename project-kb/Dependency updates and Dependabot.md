@@ -79,6 +79,52 @@ Because that job reads third-party release notes, its prompt states that pull
 request bodies and changelogs are untrusted data. It is granted no tool that
 writes anything except `gh pr comment`.
 
+### Capping what the Claude workflows can spend
+
+Runs are billed against a personal Claude subscription. There is no
+per-repository spending cap for that on either side: GitHub Actions has no
+notion of a token budget, and a subscription-billed run is not scoped to a
+repository. The cap therefore has to be built, and it is built out of three
+parts.
+
+**`.github/actions/claude-budget`** is a local composite action that reads this
+repository's own run history and refuses to start Claude past N invocations in
+a trailing seven days: 20 for review, 3 for triage.
+
+The subtlety is what it counts. Counting *workflow runs* is wrong in a way that
+bites exactly once and then never recovers: a run blocked by the gate is still
+a run, so a single week over the limit would push the count permanently above
+the cap and the workflow would never start again. It therefore counts
+*invocations*, by fetching the jobs of each past run and looking for a step
+named `Run Claude` whose conclusion is not `skipped`. Runs that skipped Claude
+cost nothing and consume nothing.
+
+Two bugs found while writing it, both worth remembering:
+
+- A failed `gh api --jq` writes the error body to **stdout**, so `2>/dev/null`
+  does not suppress it and `|| true` happily passes it along. The 404 body
+  reached `$(( used + n ))` as an operand. Every `gh api` call here now checks
+  its exit status explicitly and discards the output on failure, and both the
+  run ids and the count are validated as numeric before use.
+- A 404 is the *normal* case on a workflow's first run, so it cannot be fatal.
+  But a mistyped `workflow` input looks identical from inside the action and
+  would silently grant an unlimited budget, so the failure path emits a
+  `::warning::` rather than passing over it quietly.
+
+**`--max-turns`** bounds a single invocation: 25 for review, 60 for triage,
+which reads several changelogs per pull request. `timeout-minutes` bounds the
+job around it.
+
+**The review trigger** omits `synchronize`. That event fires on every push to a
+pull request branch, so an afternoon of six pushes would buy six reviews of
+substantially the same diff. Dropping it is the single largest saving here. The
+cost is that a pull request rewritten after its review is not reviewed again
+automatically; re-running the workflow from the Actions tab covers that.
+
+Triage additionally caps itself at five pull requests per run and names in a
+`::warning::` any it did not get to, so a backlog degrades visibly rather than
+silently.
+
 ### Trap 1: security-only mode does not cover every manifest
 
 Without `.github/dependabot.yml`, Dependabot still runs, but only in
@@ -176,7 +222,14 @@ nothing imports is a packaging bug, not a security problem.
   `disabled_manually`. Both Claude workflows now skip cleanly instead of
   failing, and both accept either `ANTHROPIC_API_KEY` or
   `CLAUDE_CODE_OAUTH_TOKEN`, but neither does anything until one of those
-  secrets exists and the review workflow is re-enabled.
+  secrets exists and the review workflow is re-enabled with
+  `gh workflow enable "Claude Review"`.
+- **The Claude GitHub App is not installed, and does not need to be.** Both
+  workflows pass `github_token: ${{ secrets.GITHUB_TOKEN }}`, which the
+  action's FAQ gives as the way to run without it. Comments therefore arrive
+  from `github-actions[bot]`, and `@claude` mentions do not work. Installing
+  the app would fix both, at the price of granting it a broad permission set
+  that GitHub does not let you narrow.
 - **`security.yml` is advisory only.** Both jobs end in `|| true`, so a green
   check means the scan ran, not that it found nothing. Making the audit job
   fail on `high` and above would have caught the React Router advisory at the

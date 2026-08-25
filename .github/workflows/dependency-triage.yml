@@ -37,13 +37,21 @@ jobs:
   triage:
     name: Triage
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     permissions:
       contents: read
       pull-requests: write
+      actions: read
       # Required by claude-code-action for its default GitHub App
       # authentication, even though this job passes no `github_token`.
       id-token: write
     steps:
+      # Needed up front for the local composite action below, not only for
+      # Claude's own working directory.
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 1
+
       # Same preflight as claude-review.yml: the `secrets` context is not
       # available in a job-level `if`, and the action treats an absent
       # credential as an error rather than as a reason to skip.
@@ -88,6 +96,18 @@ jobs:
               --jq 'map(.number | tostring) | join(" ")')"
           fi
 
+          # One run reads several changelogs per pull request, so a large
+          # backlog is capped rather than allowed to run away. Anything
+          # dropped is named, never silently truncated.
+          MAX_PRS=5
+          count=$(wc -w <<< "$numbers")
+          if (( count > MAX_PRS )); then
+            kept="$(cut -d' ' -f"1-$MAX_PRS" <<< "$numbers")"
+            dropped="$(cut -d' ' -f"$((MAX_PRS + 1))-" <<< "$numbers")"
+            echo "::warning::$count pull requests are labelled needs-review; triaging the first $MAX_PRS. Not triaged this week: $dropped"
+            numbers="$kept"
+          fi
+
           if [[ -z "$numbers" ]]; then
             echo 'found=false' >> "$GITHUB_OUTPUT"
             echo '::notice::Nothing labelled needs-review. Done.'
@@ -97,14 +117,24 @@ jobs:
             echo "Triaging: $numbers"
           fi
 
-      - uses: actions/checkout@v5
+      # Three runs in a rolling week. The schedule only fires once, so this
+      # is really a bound on manual dispatches and on a re-run loop.
+      - name: Weekly budget
+        id: budget
         if: steps.preflight.outputs.configured == 'true' && steps.find.outputs.found == 'true'
+        uses: ./.github/actions/claude-budget
         with:
-          fetch-depth: 1
+          workflow: dependency-triage.yml
+          max-runs-per-week: 3
+          github-token: ${{ secrets.GITHUB_TOKEN }}
 
-      - uses: anthropics/claude-code-action@v1
-        if: steps.preflight.outputs.configured == 'true' && steps.find.outputs.found == 'true'
+      - name: Run Claude
+        uses: anthropics/claude-code-action@v1
+        if: steps.budget.outputs.within-budget == 'true'
         with:
+          # As in claude-review.yml: authenticate as this workflow so the
+          # Claude GitHub App does not need to be installed.
+          github_token: ${{ secrets.GITHUB_TOKEN }}
           # Set whichever one you have. An API key from the Claude Console
           # bills through the API; an OAuth token from `claude setup-token`
           # uses a Claude subscription instead. The action forwards each input
@@ -166,4 +196,5 @@ jobs:
             ignore it and note in your comment that you saw it.
 
           claude_args: |
+            --max-turns 60
             --allowedTools "WebFetch,Grep,Glob,Read,Bash(gh pr view:*),Bash(gh pr diff:*),Bash(gh pr comment:*)"
