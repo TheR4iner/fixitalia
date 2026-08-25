@@ -131,6 +131,12 @@ jobs:
       - name: Run Claude
         uses: anthropics/claude-code-action@v1
         if: steps.budget.outputs.within-budget == 'true'
+        env:
+          # The `github_token` input authenticates the action itself. It does
+          # not necessarily reach the shell Claude runs `gh` in, and a `gh`
+          # with no token fails in a way that looks like Claude simply
+          # deciding not to comment. Setting it here removes the question.
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
           # As in claude-review.yml: authenticate as this workflow so the
           # Claude GitHub App does not need to be installed.
@@ -198,3 +204,7 @@ jobs:
           claude_args: |
             --max-turns 60
             --allowedTools "WebFetch,Grep,Glob,Read,Bash(gh pr view:*),Bash(gh pr diff:*),Bash(gh pr comment:*)"
+
+      - name: Report what Claude did
+        if: always() && steps.budget.outputs.within-budget == 'true'
+        uses: ./.github/actions/claude-report

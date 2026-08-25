@@ -1,0 +1,67 @@
+name: Report what Claude did
+description: >-
+  Surfaces the tools Claude used, any failing tool calls, and its final
+  message, from the execution log the action leaves behind.
+
+# Why this exists
+#
+# claude-code-action prints only its result envelope to the workflow log and
+# saves the turn-by-turn record to a temp file that nothing reads. So a run
+# that did no work looks exactly like a run that worked: green, silent, and
+# `is_error: false`. The first real triage run finished in six turns, posted
+# nothing, and left no way to find out why.
+#
+# This reads that file back. It never fails the job: a missing or unparseable
+# log is a warning, because losing the diagnostic must not also lose the run.
+
+inputs:
+  log:
+    description: 'Path to the execution log written by claude-code-action.'
+    required: false
+    default: /home/runner/work/_temp/claude-execution-output.json
+
+runs:
+  using: composite
+  steps:
+    - shell: bash
+      env:
+        LOG: ${{ inputs.log }}
+      run: |
+        set -uo pipefail
+
+        if [[ ! -f "$LOG" ]]; then
+          echo "::warning::No execution log at $LOG; Claude may not have started."
+          exit 0
+        fi
+
+        # The log is either a JSON array or a stream of objects, so normalise
+        # before querying it.
+        norm() { jq -s 'if (length == 1 and (.[0] | type) == "array") then .[0] else . end' "$LOG"; }
+
+        echo '--- tools used ---'
+        norm | jq -r '.[] | select(.type == "assistant")
+                      | .message.content[]? | select(.type == "tool_use") | .name' \
+          2>/dev/null | sort | uniq -c || echo '(could not parse)'
+
+        # Permission denials show up here too, which is why this warns rather
+        # than fails: a denied Bash call is usually noise, an unauthenticated
+        # `gh` is not, and only a human can tell them apart.
+        echo '--- failed tool calls ---'
+        failures="$(norm | jq -r '.[] | select(.type == "user")
+                                   | .message.content[]? | select(.type == "tool_result")
+                                   | select(.is_error == true)
+                                   | (.content | if type == "array" then map(.text? // "") | join(" ") else tostring end)' \
+          2>/dev/null || true)"
+        if [[ -n "$failures" ]]; then
+          echo "$failures"
+          echo '::warning::Claude had at least one failing tool call; see the step log.'
+        else
+          echo '(none)'
+        fi
+
+        {
+          echo '### Claude run'
+          norm | jq -r '.[] | select(.type == "result")
+                        | "- turns: \(.num_turns)\n- error: \(.is_error)\n\n\(.result // "(no final message)")"' \
+            2>/dev/null || echo '(could not parse the execution log)'
+        } >> "$GITHUB_STEP_SUMMARY"

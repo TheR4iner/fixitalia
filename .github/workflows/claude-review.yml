@@ -90,6 +90,12 @@ jobs:
       - name: Run Claude
         uses: anthropics/claude-code-action@v1
         if: steps.budget.outputs.within-budget == 'true'
+        env:
+          # The `github_token` input authenticates the action itself. It does
+          # not necessarily reach the shell Claude runs `gh` in, and a `gh`
+          # with no token fails in a way that looks like Claude simply
+          # deciding not to comment. Setting it here removes the question.
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
           # Authenticate to GitHub as this workflow rather than as the Claude
           # GitHub App, so the app does not have to be installed on the
@@ -145,3 +151,7 @@ jobs:
           claude_args: |
             --max-turns 25
             --allowedTools "mcp__github_inline_comment__create_inline_comment,Bash(gh pr comment:*),Bash(gh pr diff:*),Bash(gh pr view:*)"
+
+      - name: Report what Claude did
+        if: always() && steps.budget.outputs.within-budget == 'true'
+        uses: ./.github/actions/claude-report
