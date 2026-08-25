@@ -19,22 +19,36 @@ directories plus monthly `github-actions` updates.
 commit and squash-merges patch and minor bumps; anything carrying a major bump
 is labelled `needs-review` and left for a human.
 
-### Trap 1: with no config file, Dependabot only files five pull requests
+### Trap 1: security-only mode does not cover every manifest
 
 Without `.github/dependabot.yml`, Dependabot still runs, but only in
-security-updates mode. That mode opens one pull request per advisory and caps
-open ones at **five per repository**.
+security-updates mode: it reacts to alerts and does nothing on a schedule.
 
-This is not a cosmetic limit. In August 2026 the backend lockfile filled the
-cap with five pull requests, and the frontend lockfile therefore accumulated
-ten advisories -- including GHSA-49rj-9fvp-4h2h, an unauthenticated RCE in the
-`turbo-stream` deserializer vendored by React Router -- without a single pull
-request being opened for it. Nothing signals that this has happened. The
-Dependabot alerts page shows all of them; the pull request list shows five.
+What that produced here, on 2026-08-22 when alerts were first switched on:
+23 alerts appeared in the same second, and Dependabot dispatched exactly six
+update jobs. All six were against `server/package-lock.json`. **Not one job was
+ever created for the root `package-lock.json`**, so the frontend's ten
+advisories, one of them GHSA-49rj-9fvp-4h2h (an unauthenticated RCE in the
+`turbo-stream` deserializer vendored by React Router), were never attempted at
+all. Dependabot then did not run again for three days.
 
-The fix is the config file: scheduled version updates run alongside security
-updates and get their own, higher, `open-pull-requests-limit`, and grouping
-collapses the noise.
+```bash
+# The evidence, if this needs re-checking later:
+gh run list --workflow="Dependabot Updates" --limit 60 \
+  --json displayTitle,conclusion,createdAt \
+  --jq '.[] | [.createdAt, .conclusion, .displayTitle] | @tsv' | sort
+```
+
+GitHub does not document how many security-update jobs it will dispatch at
+once. `open-pull-requests-limit` is not the answer: it defaults to 5 but
+[applies to version updates only, and explicitly not to security
+updates](https://docs.github.com/en/code-security/reference/supply-chain-security/dependabot-options-reference).
+The lesson is not a specific number, it is that **security-only mode is
+best-effort per manifest and gives no signal when it skips one**. The alerts
+page showed 23; the pull request list showed 5. Nothing reconciled the two.
+
+Scheduled version updates fix this because they are driven by a cron over every
+directory listed in the config, not by an alert dispatcher.
 
 ### Trap 2: Dependabot proposes majors for advisories a patch would fix
 
@@ -112,9 +126,10 @@ nothing imports is a packaging bug, not a security problem.
 
 ### 2026-08-24 -- first dependency sweep, and the config that should prevent the next one
 
-Dependabot had five open pull requests (#4, #5, #6, #7, #9), all against
-`server/package-lock.json`, all mutually conflicting because they touch the
-same file.
+Dependabot had five open pull requests (#4, #5, #6, #7, #9, plus #8 already
+closed), all against `server/package-lock.json`, all mutually conflicting
+because they touch the same file. The frontend lockfile had ten advisories and
+no pull requests at all.
 
 Rather than merging them one at a time and rebasing four times, the whole thing
 was redone as a single sweep in #12: direct dependencies bumped to their latest
