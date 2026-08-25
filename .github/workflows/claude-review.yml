@@ -90,6 +90,12 @@ jobs:
       - name: Run Claude
         uses: anthropics/claude-code-action@v1
         if: steps.budget.outputs.within-budget == 'true'
+        env:
+          # The `github_token` input authenticates the action itself. It does
+          # not necessarily reach the shell Claude runs `gh` in, and a `gh`
+          # with no token fails in a way that looks like Claude simply
+          # deciding not to comment. Setting it here removes the question.
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
           # Authenticate to GitHub as this workflow rather than as the Claude
           # GitHub App, so the app does not have to be installed on the
@@ -145,3 +151,49 @@ jobs:
           claude_args: |
             --max-turns 25
             --allowedTools "mcp__github_inline_comment__create_inline_comment,Bash(gh pr comment:*),Bash(gh pr diff:*),Bash(gh pr view:*)"
+
+      # The action prints only its result envelope to the log and saves the
+      # turn-by-turn record to a temp file that nothing reads. A run that does
+      # no work therefore looks identical to a run that did: both end green
+      # and silent. This surfaces enough to tell them apart, without dumping
+      # the whole transcript.
+      - name: Report what Claude did
+        if: always() && steps.budget.outputs.within-budget == 'true'
+        env:
+          LOG: /home/runner/work/_temp/claude-execution-output.json
+        run: |
+          set -uo pipefail
+
+          if [[ ! -f "$LOG" ]]; then
+            echo '::warning::No execution log at $LOG; Claude may not have started.'
+            exit 0
+          fi
+
+          # The log is either a JSON array or a stream of objects, so
+          # normalise before querying it.
+          norm() { jq -s 'if (length == 1 and (.[0] | type) == "array") then .[0] else . end' "$LOG"; }
+
+          echo '--- tools used ---'
+          norm | jq -r '.[] | select(.type == "assistant")
+                        | .message.content[]? | select(.type == "tool_use") | .name' \
+            2>/dev/null | sort | uniq -c || echo '(could not parse)'
+
+          echo '--- failed tool calls ---'
+          failures="$(norm | jq -r '.[] | select(.type == "user")
+                                    | .message.content[]? | select(.type == "tool_result")
+                                    | select(.is_error == true)
+                                    | (.content | if type == "array" then map(.text? // "") | join(" ") else tostring end)' \
+            2>/dev/null || true)"
+          if [[ -n "$failures" ]]; then
+            echo "$failures"
+            echo "::warning::Claude had at least one failing tool call; see above."
+          else
+            echo '(none)'
+          fi
+
+          {
+            echo '### Claude run'
+            norm | jq -r '.[] | select(.type == "result")
+                          | "- turns: \(.num_turns)\n- error: \(.is_error)\n\n\(.result // "(no final message)")"' \
+              2>/dev/null || echo '(could not parse the execution log)'
+          } >> "$GITHUB_STEP_SUMMARY"

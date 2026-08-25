@@ -50,6 +50,7 @@ runs:
       env:
         GH_TOKEN: ${{ inputs.github-token }}
         REPO: ${{ github.repository }}
+        THIS_RUN: ${{ github.run_id }}
         WORKFLOW: ${{ inputs.workflow }}
         MAX_RUNS: ${{ inputs.max-runs-per-week }}
         STEP_NAME: ${{ inputs.step-name }}
@@ -84,7 +85,11 @@ runs:
         fi
 
         # Belt and braces: only ever iterate over things that are run ids.
-        run_ids="$(grep -E '^[0-9]+$' <<< "$raw_ids" || true)"
+        # The run this is executing in is excluded: its own `Run Claude` step
+        # already exists with a null conclusion, which is not "skipped", so
+        # counting it would make every run consume one unit of its own budget
+        # and turn a cap of N into a cap of N-1.
+        run_ids="$(grep -E '^[0-9]+$' <<< "$raw_ids" | grep -vxF "$THIS_RUN" || true)"
 
         used=0
         for id in $run_ids; do
