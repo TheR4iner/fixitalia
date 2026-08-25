@@ -332,13 +332,35 @@ ahead of running it:
   loader it is migrating to cannot supply the CommonJS globals. Replaced with
   `import.meta.dirname`.
 
-Also in this batch, and each verified rather than taken on trust because they
-sit on the auto-merge deny list: `surrealdb` 2.0.8 against the live local
-database (22 populated tables, result shapes unchanged), `playwright` 1.62.1
-driving every call `senatoBrowser.ts` makes on both the old and new version,
-`csv-parse` 7 (published by mistake, no breaking changes; 7.0.2 hardens the
-exact `columns` path the ingest uses), and `linkedom` 0.18.13 (CSSOM change
-not reachable from any consumer here).
+### 2026-08-25 -- the deny-listed runtime bumps, verified individually
+
+Separate from the dev-toolchain work above, and landed as their own pull
+requests rather than as a group, because `.github/dependabot.yml` excludes
+these packages from the grouped runtime update. Each was verified by something
+other than CI, since being un-vouched-for by CI is precisely why they are on
+the deny list:
+
+- **`surrealdb` 2.0.8** (#19): driven against the live local SurrealDB holding
+  22 populated tables, using the callable `authentication:` form from
+  `server/lib/db.ts`. Connect, signin, bound parameters, multi-statement
+  batches and `SELECT` from a real table all return the shapes
+  `server/lib/query.ts` expects.
+- **`playwright` 1.62.1** (#20): every call `senatoBrowser.ts` makes, in order
+  and with the same options, run against a local throwaway server on **both**
+  1.60.0 (Chromium 148) and 1.62.1 (Chromium 151). Identical behaviour. Says
+  nothing about WAF fingerprinting, which only a live Senato run can answer.
+- **`csv-parse` 7.0.2** (#21): the 7.0.0 major was published by mistake with no
+  breaking changes, per its own changelog. 7.0.2 hardens prototype replacement
+  reachable via `columns`, which is exactly what `appalti.ts:164` and
+  `spesaPubblica.ts:360` pass to `csv-parse/sync`.
+- **`linkedom` 0.18.13** (#22): the one behavioural change is CSSOM-only and no
+  consumer here touches `.style` or `getComputedStyle`.
+
+A trap worth recording from the SurrealDB run: the client's `connect()` accepts
+`authentication:` (callable, re-invoked to refresh an expired token) and
+silently ignores a plain `auth:` object, leaving the connection
+unauthenticated. The symptom is an IAM permission error on a trivial query
+rather than anything pointing at auth.
 
 
 
