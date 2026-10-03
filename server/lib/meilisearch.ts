@@ -19,6 +19,7 @@ const MEILI_URL = (process.env.MEILI_URL ?? 'http://fixitalia-meili:7700').repla
 const MEILI_MASTER_KEY = process.env.MEILI_MASTER_KEY ?? ''
 
 export const INTERVENTI_INDEX = 'parlamento_interventi'
+const INTERVENTI_PRIMARY_KEY = 'id'
 
 // Thrown when Meili cannot be reached or returns a non-2xx. The search route
 // catches this to fall back to the SurrealDB substring scan so the user still
@@ -151,7 +152,7 @@ export async function ensureInterventiIndex(): Promise<void> {
   if (!(await indexExists(INTERVENTI_INDEX))) {
     const task = await meiliFetch<MeiliTask>('POST', '/indexes', {
       uid: INTERVENTI_INDEX,
-      primaryKey: 'id',
+      primaryKey: INTERVENTI_PRIMARY_KEY,
     })
     await waitForTask(task)
   }
@@ -304,9 +305,12 @@ export async function addInterventiDocs(
   opts: { wait?: boolean } = {},
 ): Promise<void> {
   if (docs.length === 0) return
+  // The ingest hook can run before ensureInterventiIndex (only the server boot
+  // calls it), so this add may auto-create the index. Without an explicit key
+  // Meili tries to infer one, sees both `id` and `sid`, and fails every batch.
   const task = await meiliFetch<MeiliTask>(
     'POST',
-    `/indexes/${INTERVENTI_INDEX}/documents`,
+    `/indexes/${INTERVENTI_INDEX}/documents?primaryKey=${INTERVENTI_PRIMARY_KEY}`,
     docs,
   )
   if (opts.wait) await waitForTask(task)
@@ -417,6 +421,14 @@ export async function waitForMeiliIdle(
     }
     await new Promise((r) => setTimeout(r, intervalMs))
   }
+}
+
+export async function interventiDocCount(): Promise<number> {
+  const stats = await meiliFetch<{ numberOfDocuments: number }>(
+    'GET',
+    `/indexes/${INTERVENTI_INDEX}/stats`,
+  )
+  return stats.numberOfDocuments
 }
 
 export async function meiliHealth(): Promise<boolean> {

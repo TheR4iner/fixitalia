@@ -17,9 +17,9 @@
 // Idempotent: documents are upserted by id, so re-running re-pushes the same
 // docs without duplicating. Safe to re-run after an interruption.
 //
-// Usage (inside the workspace):
-//   dev exec backend npx tsx scripts/meili-sync.ts
-//   dev exec backend npx tsx scripts/meili-sync.ts --fresh   # delete index first
+// Usage, from server/ (env as for the backend: SURREALDB_URL, MEILI_URL, ...):
+//   npx tsx scripts/meili-sync.ts
+//   npx tsx scripts/meili-sync.ts --fresh   # delete index first
 // -----------------------------------------------------------------------------
 
 import { runQuery } from '../lib/query.ts'
@@ -28,6 +28,7 @@ import {
   INTERVENTI_INDEX,
   addInterventiDocs,
   ensureInterventiIndex,
+  interventiDocCount,
   mapInterventoRow,
   meiliHealth,
   waitForMeiliIdle,
@@ -43,6 +44,10 @@ interface SedutaMeta {
   legislatura: number | null
   numero: number | null
   data: unknown
+  organo: string | null
+  tipo_resoconto: string | null
+  organo_slug: string | null
+  organo_nome: string | null
 }
 
 // Raw interventi row: mandato_id / odg_id are the RAW record links (selecting
@@ -69,10 +74,12 @@ async function deleteIndexIfFresh(): Promise<void> {
     method: 'DELETE',
     headers,
   })
-  if (res.ok) {
-    const task = (await res.json()) as { taskUid?: number; uid?: number }
-    await waitForTask(task)
+  if (res.status === 404) return
+  if (!res.ok) {
+    throw new Error(`--fresh: DELETE index failed with ${res.status}: ${await res.text()}`)
   }
+  const task = (await res.json()) as { taskUid?: number; uid?: number }
+  await waitForTask(task)
 }
 
 async function main(): Promise<void> {
@@ -90,7 +97,8 @@ async function main(): Promise<void> {
   // --- Resolve dimension tables into in-memory maps (3 small scans) ---
   const sedutaRows =
     (await runQuery<Array<{ id: unknown } & SedutaMeta>>(
-      `SELECT id, chamber, legislatura, numero, data FROM parlamento_sedute;`,
+      `SELECT id, chamber, legislatura, numero, data, organo, tipo_resoconto, organo_slug, organo_nome
+       FROM parlamento_sedute;`,
     )) ?? []
   const sedutaMap = new Map<string, SedutaMeta>()
   for (const s of sedutaRows) {
@@ -99,6 +107,10 @@ async function main(): Promise<void> {
       legislatura: typeof s.legislatura === 'number' ? s.legislatura : null,
       numero: typeof s.numero === 'number' ? s.numero : null,
       data: s.data,
+      organo: s.organo ?? null,
+      tipo_resoconto: s.tipo_resoconto ?? null,
+      organo_slug: s.organo_slug ?? null,
+      organo_nome: s.organo_nome ?? null,
     })
   }
   console.log(`[meili-sync] loaded ${sedutaMap.size} sedute`)
@@ -172,6 +184,10 @@ async function main(): Promise<void> {
         legislatura: meta?.legislatura ?? null,
         seduta_numero: meta?.numero ?? null,
         seduta_data: meta?.data,
+        organo: meta?.organo ?? null,
+        tipo_resoconto: meta?.tipo_resoconto ?? null,
+        organo_slug: meta?.organo_slug ?? null,
+        organo_nome: meta?.organo_nome ?? null,
         odg_titolo: r.odg_id == null ? null : odgMap.get(String(r.odg_id)) ?? null,
       }
       buffer.push(mapInterventoRow(row))
@@ -183,6 +199,13 @@ async function main(): Promise<void> {
 
   console.log(`[meili-sync] all ${pushed} docs enqueued; waiting for Meili to drain...`)
   await waitForMeiliIdle()
+  // Batches are enqueued without waiting, so a failed task never throws here.
+  const indexed = await interventiDocCount()
+  if (indexed < pushed) {
+    throw new Error(
+      `only ${indexed} of ${pushed} documents are in the index; check GET /tasks?statuses=failed`,
+    )
+  }
   const elapsed = ((Date.now() - startedAt) / 1000).toFixed(0)
   console.log(`[meili-sync] DONE: ${pushed} documents in ${elapsed}s`)
 }
