@@ -115,6 +115,8 @@ into `WHERE seduta_id = $sid`, or it matches nothing.)
 
 ## History
 
+- **2026-10-03** -- Fresh-stack bugs found while building a slim local dataset (PR #47). (1) On an empty Meili the ingest hook's first add auto-created the index before `ensureInterventiIndex` (server boot only), Meili could not infer the primary key (`id` and `sid` both end in `id`), and every batch failed silently; `addInterventiDocs` now passes `?primaryKey=id`. (2) `meili-sync.ts` reported DONE regardless, because it only drains the queue; it now fails when the index holds fewer documents than it pushed. (3) The cold sync never carried `organo`/`tipo_resoconto`/`organo_slug`/`organo_nome`, so a rebuild labelled committee speeches as plenary and Senato sommari as verbatim; fixed, and verified field-identical to the hook. The mapper's `assemblea`/`stenografico` defaults are deliberate: plenary sittings ingested after the one-shot backfill have no `organo`, and the route's `organo NOT EXISTS` filter does not match null. (4) `--fresh` now throws on a failed DELETE.
+
 - **2026-06-16** -- Implemented. Promoted the compact GC-rebuilt SurrealDB to
   live (see [[SurrealDB blob bloat]]), added the Meili sidecar (dev+prod),
   client, per-seduta hook, cold-sync script, and rewired `/search` +
