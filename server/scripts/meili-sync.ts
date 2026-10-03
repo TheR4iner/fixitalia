@@ -28,6 +28,7 @@ import {
   INTERVENTI_INDEX,
   addInterventiDocs,
   ensureInterventiIndex,
+  interventiDocCount,
   mapInterventoRow,
   meiliHealth,
   waitForMeiliIdle,
@@ -183,6 +184,13 @@ async function main(): Promise<void> {
 
   console.log(`[meili-sync] all ${pushed} docs enqueued; waiting for Meili to drain...`)
   await waitForMeiliIdle()
+  // Batches are enqueued without waiting, so a failed task never throws here.
+  const indexed = await interventiDocCount()
+  if (indexed < pushed) {
+    throw new Error(
+      `only ${indexed} of ${pushed} documents are in the index; check GET /tasks?statuses=failed`,
+    )
+  }
   const elapsed = ((Date.now() - startedAt) / 1000).toFixed(0)
   console.log(`[meili-sync] DONE: ${pushed} documents in ${elapsed}s`)
 }
