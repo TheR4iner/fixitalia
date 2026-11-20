@@ -41,6 +41,8 @@ npm install && npm run dev                  # frontend, http://localhost:5173
 cd server && npm install && npm run dev     # backend,  http://localhost:3001
 ```
 
+`INBOUND_PORTS` in the override opens the dev ports in the workspace firewall, so other LAN machines reach the published ports (5183 frontend, 3011 backend) at the devbox address.
+
 Vite proxies `/api` to the backend, so browse via the frontend port. Both
 watchers reload on save; neither needs a build step first.
 
